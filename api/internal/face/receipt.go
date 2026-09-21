@@ -49,11 +49,13 @@ func (s *ReceiptStore) Issue(receipt Receipt) (string, error) {
 		return "", err
 	}
 	token := base64.RawURLEncoding.EncodeToString(random[:])
+	now := s.now()
 	receipt.State = ReceiptUnused
-	receipt.ExpiresAt = s.now().Add(s.ttl)
+	receipt.ExpiresAt = now.Add(s.ttl)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.purgeExpiredLocked(now)
 	s.receipts[token] = &receipt
 	return token, nil
 }
@@ -61,8 +63,10 @@ func (s *ReceiptStore) Issue(receipt Receipt) (string, error) {
 func (s *ReceiptStore) Claim(token string) (*Receipt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
+	s.purgeExpiredLocked(now)
 	receipt, ok := s.receipts[token]
-	if !ok || !s.now().Before(receipt.ExpiresAt) {
+	if !ok || !now.Before(receipt.ExpiresAt) {
 		delete(s.receipts, token)
 		return nil, ErrReceiptInvalid
 	}
@@ -93,5 +97,14 @@ func (s *ReceiptStore) Consume(token string) {
 	defer s.mu.Unlock()
 	if receipt, ok := s.receipts[token]; ok && receipt.State == ReceiptInFlight {
 		receipt.State = ReceiptConsumed
+	}
+}
+
+func (s *ReceiptStore) purgeExpiredLocked(now time.Time) {
+	for token, receipt := range s.receipts {
+		if (receipt.State == ReceiptUnused || receipt.State == ReceiptConsumed) &&
+			!now.Before(receipt.ExpiresAt) {
+			delete(s.receipts, token)
+		}
 	}
 }

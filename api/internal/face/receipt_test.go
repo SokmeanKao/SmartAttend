@@ -78,3 +78,32 @@ func TestReceiptConsumePreventsReuse(t *testing.T) {
 		t.Fatalf("Claim() after Consume error = %v, want ErrReceiptInvalid", err)
 	}
 }
+
+func TestReceiptIssuePurgesExpiredUnusedAndConsumedEntries(t *testing.T) {
+	now := time.Date(2026, 9, 22, 0, 0, 0, 0, time.UTC)
+	store := NewReceiptStore(time.Minute, func() time.Time { return now })
+	if _, err := store.Issue(Receipt{EmployeeID: "unused"}); err != nil {
+		t.Fatal(err)
+	}
+	consumedToken, err := store.Issue(Receipt{EmployeeID: "consumed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Claim(consumedToken); err != nil {
+		t.Fatal(err)
+	}
+	store.Consume(consumedToken)
+	now = now.Add(time.Minute)
+
+	currentToken, err := store.Issue(Receipt{EmployeeID: "current"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(store.receipts) != 1 {
+		t.Fatalf("receipt count = %d, want 1", len(store.receipts))
+	}
+	if _, ok := store.receipts[currentToken]; !ok {
+		t.Fatal("current receipt was not retained")
+	}
+}

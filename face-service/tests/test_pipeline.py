@@ -230,6 +230,19 @@ def test_verify_rejects_model_mismatch():
     assert error.value.code == "MODEL_VERSION_MISMATCH"
 
 
+def test_verify_rejects_non_object_reference_with_structured_error():
+    pipeline = EmbeddingPipeline(
+        settings=Settings(),
+        detector=_Detector(),
+        recognizer=_Recognizer(),
+    )
+
+    with pytest.raises(FacePipelineError) as error:
+        pipeline.verify(_png_bytes(), [None])  # type: ignore[list-item]
+
+    assert error.value.code == "INVALID_REFERENCE_TEMPLATES"
+
+
 def test_real_yunet_sface_positive_path_when_models_are_available():
     settings = Settings()
     if not settings.yunet_model_path.is_file() or not settings.sface_model_path.is_file():

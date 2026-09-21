@@ -194,3 +194,20 @@ func TestPublicVerifyRateLimitsByIP(t *testing.T) {
 		t.Fatalf("status = %d, want 429", response.Code)
 	}
 }
+
+func TestIPRateLimiterEvictsStaleWindows(t *testing.T) {
+	now := time.Date(2026, 9, 22, 0, 0, 0, 0, time.UTC)
+	limiter := newIPRateLimiter(20, time.Minute, func() time.Time { return now })
+	limiter.Allow("203.0.113.1")
+	limiter.Allow("203.0.113.2")
+	now = now.Add(time.Minute)
+
+	limiter.Allow("203.0.113.3")
+
+	if len(limiter.ips) != 1 {
+		t.Fatalf("tracked IP windows = %d, want 1", len(limiter.ips))
+	}
+	if _, ok := limiter.ips["203.0.113.3"]; !ok {
+		t.Fatal("current IP window was not retained")
+	}
+}

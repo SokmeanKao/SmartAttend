@@ -113,6 +113,11 @@ class EmbeddingPipeline:
             )
         vectors: list[tuple[str, np.ndarray]] = []
         for reference in references:
+            if not isinstance(reference, dict):
+                raise FacePipelineError(
+                    "INVALID_REFERENCE_TEMPLATES",
+                    "each reference template must be an object",
+                )
             if (
                 reference.get("model_name") != "sface"
                 or reference.get("model_version") != "2021dec"

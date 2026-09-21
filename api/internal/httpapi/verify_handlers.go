@@ -160,6 +160,11 @@ func (l *ipRateLimiter) Allow(ip string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
+	for trackedIP, trackedWindow := range l.ips {
+		if !now.Before(trackedWindow.start.Add(l.window)) {
+			delete(l.ips, trackedIP)
+		}
+	}
 	entry := l.ips[ip]
 	if entry.start.IsZero() || !now.Before(entry.start.Add(l.window)) {
 		l.ips[ip] = rateWindow{start: now, count: 1}
