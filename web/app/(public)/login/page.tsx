@@ -31,8 +31,8 @@ export default function LoginPage() {
       await apiFetch<{ username: string }>("/api/v1/auth/login", {
         method: "POST",
         body: JSON.stringify({
-          username: form.get("username"),
-          password: form.get("password"),
+          username: String(form.get("username") ?? "").trim(),
+          password: String(form.get("password") ?? ""),
         }),
       });
       router.replace("/dashboard");

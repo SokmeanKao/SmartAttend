@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/smartattend/api/internal/auth"
@@ -29,10 +30,10 @@ func (h authHandlers) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	usernameMatches := subtle.ConstantTimeCompare(
-		[]byte(credentials.Username),
-		[]byte(h.cfg.AdminUsername),
-	) == 1
+	username := strings.TrimSpace(credentials.Username)
+	// Length-equal compare only; mismatched lengths must not panic/false-negative oddly.
+	usernameMatches := len(username) == len(h.cfg.AdminUsername) &&
+		subtle.ConstantTimeCompare([]byte(username), []byte(h.cfg.AdminUsername)) == 1
 	passwordMatches := auth.VerifyPassword(h.cfg.AdminPasswordHash, credentials.Password)
 	if !usernameMatches || !passwordMatches {
 		WriteError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "Invalid credentials")

@@ -1,5 +1,6 @@
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
+// Prefer same-origin (empty base) so cookies stay first-party via Next rewrites.
+// Override only when intentionally calling the API host directly.
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").trim();
 
 type ApiErrorEnvelope = {
   error?: {

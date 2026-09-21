@@ -44,9 +44,13 @@ services:
       FACE_MATCH_THRESHOLD: "0.363"
 
   web:
-    build: ./web
+    build:
+      context: ./web
+      args:
+        API_PROXY_TARGET: http://api:8080
     environment:
-      NEXT_PUBLIC_API_BASE_URL: http://localhost:8080
+      # Browser must use same-origin /api (Next rewrite → Go). Do not set :8080 here.
+      NEXT_PUBLIC_API_BASE_URL: ""
     ports:
       - "3000:3000"
     depends_on:
