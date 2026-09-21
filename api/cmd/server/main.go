@@ -26,7 +26,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	handler := httpapi.NewRouter(cfg, employee.NewStore(pool))
+	handler := httpapi.NewRouterWithDatabase(cfg, employee.NewStore(pool), pool)
 
 	log.Println("api listening on :8080")
 	if err := http.ListenAndServe(":8080", handler); err != nil {
