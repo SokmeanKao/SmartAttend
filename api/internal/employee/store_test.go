@@ -57,9 +57,13 @@ func TestStoreEmployeeLifecycle(t *testing.T) {
 
 	firstName := "Sophea"
 	status := StatusInactive
+	updateInvalidated := false
 	updated, err := store.Update(ctx, created.ID, UpdateParams{
 		FirstName: &firstName,
 		Status:    &status,
+	}, func() {
+		assertEmployeeAdvisoryLockHeld(t, store, created.ID)
+		updateInvalidated = true
 	})
 	if err != nil {
 		t.Fatalf("Update() error = %v", err)
@@ -67,8 +71,15 @@ func TestStoreEmployeeLifecycle(t *testing.T) {
 	if updated.FirstName != firstName || updated.Status != StatusInactive {
 		t.Errorf("updated employee = %#v", updated)
 	}
+	if !updateInvalidated {
+		t.Error("Update(INACTIVE) did not invalidate enrollment sessions")
+	}
 
-	deactivated, err := store.Deactivate(ctx, created.ID)
+	deactivateInvalidated := false
+	deactivated, err := store.Deactivate(ctx, created.ID, func() {
+		assertEmployeeAdvisoryLockHeld(t, store, created.ID)
+		deactivateInvalidated = true
+	})
 	if err != nil {
 		t.Fatalf("Deactivate() error = %v", err)
 	}
@@ -77,6 +88,9 @@ func TestStoreEmployeeLifecycle(t *testing.T) {
 	}
 	if deactivated.EnrollmentStatus != EnrollmentNotEnrolled {
 		t.Errorf("enrollment status changed to %q", deactivated.EnrollmentStatus)
+	}
+	if !deactivateInvalidated {
+		t.Error("Deactivate() did not invalidate enrollment sessions")
 	}
 
 	got, err := store.Get(ctx, created.ID)
@@ -183,7 +197,7 @@ func TestEnrollmentCommitRejectsInactiveEmployee(t *testing.T) {
 	store := newIntegrationStore(t)
 	ctx := context.Background()
 	created := createTestEmployee(t, store, "INACTIVE")
-	if _, err := store.Deactivate(ctx, created.ID); err != nil {
+	if _, err := store.Deactivate(ctx, created.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -218,7 +232,7 @@ func TestEnrollmentCommitWaitsForConcurrentDeactivate(t *testing.T) {
 
 	deactivateResult := make(chan error, 1)
 	go func() {
-		_, err := store.Deactivate(ctx, created.ID)
+		_, err := store.Deactivate(ctx, created.ID, nil)
 		deactivateResult <- err
 	}()
 	waitForAdvisoryLock(t, store)
@@ -309,6 +323,117 @@ func TestEnrollmentCommitFailsAfterConcurrentFaceDeleteInvalidatesSession(t *tes
 	assertActiveTemplateSet(t, store, created.ID, 0)
 }
 
+func TestDeactivateInvalidatesBeforeReactivationCanCommit(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	created := createTestEmployee(t, store, "DEACTIVATE_INVALIDATE")
+	employeeID := uuid.MustParse(created.ID)
+	enrollments := face.NewMemoryEnrollmentStore(10*time.Minute, time.Now)
+	enrollmentID, err := enrollments.Start(employeeID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pose, tmpl := range stagedTemplates(1) {
+		if err := enrollments.Capture(enrollmentID, pose, tmpl); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	invalidating := make(chan struct{})
+	releaseInvalidator := make(chan struct{})
+	deactivateResult := make(chan error, 1)
+	go func() {
+		_, err := store.Deactivate(ctx, created.ID, func() {
+			enrollments.InvalidateEmployee(employeeID)
+			close(invalidating)
+			<-releaseInvalidator
+		})
+		deactivateResult <- err
+	}()
+	<-invalidating
+
+	active := StatusActive
+	reactivateResult := make(chan error, 1)
+	go func() {
+		_, err := store.Update(ctx, created.ID, UpdateParams{Status: &active}, nil)
+		reactivateResult <- err
+	}()
+	select {
+	case err := <-reactivateResult:
+		t.Fatalf("reactivation completed before invalidator released: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseInvalidator)
+	if err := <-deactivateResult; err != nil {
+		t.Fatalf("Deactivate() error = %v", err)
+	}
+	if err := <-reactivateResult; err != nil {
+		t.Fatalf("Update(ACTIVE) error = %v", err)
+	}
+
+	err = store.CommitEnrollment(ctx, created.ID, func() (*face.Enrollment, error) {
+		return enrollments.Get(enrollmentID)
+	})
+	if !errors.Is(err, face.ErrEnrollmentExpired) {
+		t.Fatalf("CommitEnrollment() error = %v, want ErrEnrollmentExpired", err)
+	}
+}
+
+func TestEnrollmentStartWaitsForConcurrentDeactivate(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	created := createTestEmployee(t, store, "START_DEACTIVATE_RACE")
+	employeeID := uuid.MustParse(created.ID)
+	enrollments := face.NewMemoryEnrollmentStore(10*time.Minute, time.Now)
+
+	blocker, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback(ctx)
+	var lockedID string
+	if err := blocker.QueryRow(ctx,
+		`SELECT id FROM employees WHERE id = $1 FOR UPDATE`,
+		created.ID,
+	).Scan(&lockedID); err != nil {
+		t.Fatal(err)
+	}
+
+	deactivateResult := make(chan error, 1)
+	go func() {
+		_, err := store.Deactivate(ctx, created.ID, func() {
+			enrollments.InvalidateEmployee(employeeID)
+		})
+		deactivateResult <- err
+	}()
+	waitForAdvisoryLock(t, store)
+
+	var startCalled bool
+	startResult := make(chan error, 1)
+	go func() {
+		_, err := store.StartEnrollment(ctx, created.ID, func(base map[face.Pose]uuid.UUID) (string, error) {
+			startCalled = true
+			_, err := enrollments.Start(employeeID, base)
+			return "", err
+		})
+		startResult <- err
+	}()
+
+	if err := blocker.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-deactivateResult; err != nil {
+		t.Fatalf("Deactivate() error = %v", err)
+	}
+	if err := <-startResult; !errors.Is(err, ErrInactive) {
+		t.Fatalf("StartEnrollment() error = %v, want ErrInactive", err)
+	}
+	if startCalled {
+		t.Fatal("StartEnrollment callback ran for inactive employee")
+	}
+}
+
 func TestIncompleteEnrollmentCannotCommit(t *testing.T) {
 	store := newIntegrationStore(t)
 	ctx := context.Background()
@@ -345,6 +470,20 @@ func waitForAdvisoryLock(t *testing.T, store *Store) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("timed out waiting for employee advisory lock")
+}
+
+func assertEmployeeAdvisoryLockHeld(t *testing.T, store *Store, employeeID string) {
+	t.Helper()
+	var acquired bool
+	if err := store.pool.QueryRow(context.Background(),
+		`SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0))`,
+		employeeID,
+	).Scan(&acquired); err != nil {
+		t.Fatal(err)
+	}
+	if acquired {
+		t.Fatal("enrollment invalidator ran without employee advisory lock")
+	}
 }
 
 func newIntegrationStore(t *testing.T) *Store {

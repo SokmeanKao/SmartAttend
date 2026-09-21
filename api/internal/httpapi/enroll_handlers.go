@@ -15,7 +15,7 @@ import (
 const maxEnrollmentImageBytes = 5 << 20
 
 type faceTemplateStore interface {
-	ActiveTemplateIDs(context.Context, string) (map[face.Pose]uuid.UUID, error)
+	StartEnrollment(context.Context, string, employee.EnrollmentStarter) (string, error)
 	CommitEnrollment(
 		context.Context,
 		string,
@@ -36,16 +36,19 @@ type enrollHandlers struct {
 }
 
 func (h enrollHandlers) start(w http.ResponseWriter, r *http.Request) {
-	employeeID, found, ok := h.activeEmployee(w, r, r.PathValue("id"))
-	if !ok {
-		return
-	}
-	baseTemplates, err := h.templates.ActiveTemplateIDs(r.Context(), found.ID)
+	id := r.PathValue("id")
+	employeeID, err := uuid.Parse(id)
 	if err != nil {
-		writeEnrollmentError(w, err)
+		writeEmployeeError(w, employee.ErrNotFound)
 		return
 	}
-	enrollmentID, err := h.enrollments.Start(employeeID, baseTemplates)
+	enrollmentID, err := h.templates.StartEnrollment(
+		r.Context(),
+		id,
+		func(baseTemplates map[face.Pose]uuid.UUID) (string, error) {
+			return h.enrollments.Start(employeeID, baseTemplates)
+		},
+	)
 	if err != nil {
 		writeEnrollmentError(w, err)
 		return
@@ -241,8 +244,12 @@ func writeEnrollmentError(w http.ResponseWriter, err error) {
 
 type unavailableFaceTemplateStore struct{}
 
-func (unavailableFaceTemplateStore) ActiveTemplateIDs(context.Context, string) (map[face.Pose]uuid.UUID, error) {
-	return nil, errors.New("face template store unavailable")
+func (unavailableFaceTemplateStore) StartEnrollment(
+	context.Context,
+	string,
+	employee.EnrollmentStarter,
+) (string, error) {
+	return "", errors.New("face template store unavailable")
 }
 func (unavailableFaceTemplateStore) CommitEnrollment(
 	context.Context,

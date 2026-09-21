@@ -16,8 +16,8 @@ type employeeStore interface {
 	Create(context.Context, employee.CreateParams) (employee.Employee, error)
 	List(context.Context, string) ([]employee.Employee, error)
 	Get(context.Context, string) (employee.Employee, error)
-	Update(context.Context, string, employee.UpdateParams) (employee.Employee, error)
-	Deactivate(context.Context, string) (employee.Employee, error)
+	Update(context.Context, string, employee.UpdateParams, func()) (employee.Employee, error)
+	Deactivate(context.Context, string, func()) (employee.Employee, error)
 }
 
 type employeeInvalidator interface {
@@ -144,25 +144,26 @@ func (h employeeHandlers) patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := h.store.Update(r.Context(), r.PathValue("id"), params)
+	id := r.PathValue("id")
+	updated, err := h.store.Update(r.Context(), id, params, func() {
+		h.invalidator.InvalidateEmployee(id)
+	})
 	if err != nil {
 		writeEmployeeError(w, err)
 		return
-	}
-	if updated.Status == employee.StatusInactive {
-		h.invalidator.InvalidateEmployee(updated.ID)
 	}
 	writeJSON(w, http.StatusOK, updated)
 }
 
 func (h employeeHandlers) deactivate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	deactivated, err := h.store.Deactivate(r.Context(), id)
+	deactivated, err := h.store.Deactivate(r.Context(), id, func() {
+		h.invalidator.InvalidateEmployee(id)
+	})
 	if err != nil {
 		writeEmployeeError(w, err)
 		return
 	}
-	h.invalidator.InvalidateEmployee(id)
 	writeJSON(w, http.StatusOK, deactivated)
 }
 
@@ -264,9 +265,9 @@ func (unavailableEmployeeStore) List(context.Context, string) ([]employee.Employ
 func (unavailableEmployeeStore) Get(context.Context, string) (employee.Employee, error) {
 	return employee.Employee{}, errors.New("employee store unavailable")
 }
-func (unavailableEmployeeStore) Update(context.Context, string, employee.UpdateParams) (employee.Employee, error) {
+func (unavailableEmployeeStore) Update(context.Context, string, employee.UpdateParams, func()) (employee.Employee, error) {
 	return employee.Employee{}, errors.New("employee store unavailable")
 }
-func (unavailableEmployeeStore) Deactivate(context.Context, string) (employee.Employee, error) {
+func (unavailableEmployeeStore) Deactivate(context.Context, string, func()) (employee.Employee, error) {
 	return employee.Employee{}, errors.New("employee store unavailable")
 }

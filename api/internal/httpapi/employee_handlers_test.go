@@ -178,20 +178,33 @@ func (s *stubEmployeeStore) Get(_ context.Context, id string) (employeeapi.Emplo
 	return s.employees[0], nil
 }
 
-func (s *stubEmployeeStore) Update(_ context.Context, _ string, params employeeapi.UpdateParams) (employeeapi.Employee, error) {
+func (s *stubEmployeeStore) Update(
+	_ context.Context,
+	_ string,
+	params employeeapi.UpdateParams,
+	invalidate func(),
+) (employeeapi.Employee, error) {
 	s.updateCalls++
 	s.updated = params
 	result := sampleEmployee()
 	if params.Status != nil {
 		result.Status = *params.Status
 	}
+	if result.Status == employeeapi.StatusInactive {
+		invalidate()
+	}
 	return result, nil
 }
 
-func (s *stubEmployeeStore) Deactivate(_ context.Context, id string) (employeeapi.Employee, error) {
+func (s *stubEmployeeStore) Deactivate(
+	_ context.Context,
+	id string,
+	invalidate func(),
+) (employeeapi.Employee, error) {
 	s.deactivatedID = id
 	result := sampleEmployee()
 	result.Status = employeeapi.StatusInactive
+	invalidate()
 	return result, nil
 }
 
@@ -200,6 +213,20 @@ func (s *stubEmployeeStore) ActiveTemplateIDs(
 	_ string,
 ) (map[faceapi.Pose]uuid.UUID, error) {
 	return map[faceapi.Pose]uuid.UUID{}, nil
+}
+
+func (s *stubEmployeeStore) StartEnrollment(
+	_ context.Context,
+	_ string,
+	start employeeapi.EnrollmentStarter,
+) (string, error) {
+	if len(s.employees) == 0 {
+		return "", employeeapi.ErrNotFound
+	}
+	if s.employees[0].Status != employeeapi.StatusActive {
+		return "", employeeapi.ErrInactive
+	}
+	return start(map[faceapi.Pose]uuid.UUID{})
 }
 
 func (s *stubEmployeeStore) CommitEnrollment(

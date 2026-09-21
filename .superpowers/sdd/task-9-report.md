@@ -19,3 +19,10 @@
 - Face deletion invalidates pending sessions while holding the same advisory lock.
 - Deterministic face-delete-vs-commit test proves the waiting initial commit returns `ENROLLMENT_EXPIRED`.
 - `go test ./... -count=1` and Docker CGO employee/httpapi `-race`: passed.
+
+## Final ENROLL-03 follow-up
+- Deactivate and PATCH-to-inactive invalidate enrollment sessions before committing and releasing the employee lock.
+- Enrollment start now locks the employee, re-reads `ACTIVE`, snapshots base templates, and creates staging in one critical section.
+- Added deterministic deactivate/reactivate and deactivate/start race tests.
+- `go test ./... -count=1`: passed.
+- Targeted Docker CGO lifecycle and full HTTP `-race`: passed; the broader employee race run hit Testcontainers startup timeout.

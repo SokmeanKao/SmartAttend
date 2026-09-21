@@ -63,6 +63,7 @@ type Store struct {
 }
 
 type EnrollmentLoader func() (*face.Enrollment, error)
+type EnrollmentStarter func(map[face.Pose]uuid.UUID) (string, error)
 
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
@@ -127,7 +128,12 @@ func (s *Store) Get(ctx context.Context, id string) (Employee, error) {
 	return employee, mapStoreError(err)
 }
 
-func (s *Store) Update(ctx context.Context, id string, params UpdateParams) (Employee, error) {
+func (s *Store) Update(
+	ctx context.Context,
+	id string,
+	params UpdateParams,
+	invalidate func(),
+) (Employee, error) {
 	if params.Status == nil {
 		return s.update(ctx, s.pool, id, params)
 	}
@@ -143,6 +149,9 @@ func (s *Store) Update(ctx context.Context, id string, params UpdateParams) (Emp
 	updated, err := s.update(ctx, tx, id, params)
 	if err != nil {
 		return Employee{}, err
+	}
+	if updated.Status == StatusInactive && invalidate != nil {
+		invalidate()
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Employee{}, err
@@ -189,7 +198,7 @@ func (s *Store) update(
 	return employee, mapStoreError(err)
 }
 
-func (s *Store) Deactivate(ctx context.Context, id string) (Employee, error) {
+func (s *Store) Deactivate(ctx context.Context, id string, invalidate func()) (Employee, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Employee{}, err
@@ -209,10 +218,72 @@ func (s *Store) Deactivate(ctx context.Context, id string) (Employee, error) {
 	if err != nil {
 		return Employee{}, mapStoreError(err)
 	}
+	if invalidate != nil {
+		invalidate()
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Employee{}, err
 	}
 	return employee, nil
+}
+
+func (s *Store) StartEnrollment(
+	ctx context.Context,
+	employeeID string,
+	start EnrollmentStarter,
+) (string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockEmployee(ctx, tx, employeeID); err != nil {
+		return "", err
+	}
+
+	var status string
+	if err := tx.QueryRow(ctx,
+		`SELECT status FROM employees WHERE id = $1 FOR UPDATE`,
+		employeeID,
+	).Scan(&status); err != nil {
+		return "", mapStoreError(err)
+	}
+	if status != StatusActive {
+		return "", ErrInactive
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT pose, id
+		FROM face_templates
+		WHERE employee_id = $1 AND revoked_at IS NULL
+	`, employeeID)
+	if err != nil {
+		return "", err
+	}
+	baseTemplateIDs := make(map[face.Pose]uuid.UUID)
+	for rows.Next() {
+		var pose face.Pose
+		var id uuid.UUID
+		if err := rows.Scan(&pose, &id); err != nil {
+			rows.Close()
+			return "", err
+		}
+		baseTemplateIDs[pose] = id
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", err
+	}
+	rows.Close()
+
+	enrollmentID, err := start(baseTemplateIDs)
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return enrollmentID, nil
 }
 
 func (s *Store) ActiveTemplateIDs(ctx context.Context, employeeID string) (map[face.Pose]uuid.UUID, error) {
