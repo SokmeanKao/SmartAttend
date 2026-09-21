@@ -1,6 +1,6 @@
 # SmartAttend MVP-1 Design
 
-**Status:** Frozen (Sections 1–7)  
+**Status:** Frozen (Sections 1–7) + post-review amendments (HTTP-01, model pin, ENROLL-03, session env cleanup)  
 **Date:** 2026-09-21  
 **Scope:** Employee CRUD, guided 3-pose enrollment, 1:1 face verification, verification receipts, basic check-in/check-out
 
@@ -52,6 +52,16 @@ Go API
 | **FACE-ENROLL-01** | Enrollment uses three quality-controlled guided captures: `FRONT`, `LEFT`, `RIGHT`. Each successful capture produces one independently stored active face template. |
 | **FACE-VERIFY-01** | 1:1 verification compares the live embedding against all compatible active templates for the selected employee. The highest valid similarity score drives the recognition decision. |
 | **FACE-ARCH-01** | Face-service owns biometric computation. Go owns application state, persistence, authentication, employees, and attendance. |
+| **HTTP-01** | Browser-facing API allows only the configured `WEB_ORIGIN`. Credentialed CORS uses the exact origin (never `*`). Unsafe methods also pass the Origin/CSRF check. Development must use one hostname consistently (`localhost`, not mixed with `127.0.0.1`). |
+
+```text
+WEB_ORIGIN=http://localhost:3000
+
+Access-Control-Allow-Origin: <exact WEB_ORIGIN>
+Access-Control-Allow-Credentials: true
+Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: Content-Type  (and others as needed)
+```
 
 ---
 
@@ -165,10 +175,10 @@ Success payloads are resource-shaped (no generic wrapper).
 | `POST` | `/api/v1/auth/logout` | Session |
 | `GET` | `/healthz` | Public |
 
-- Env: `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH` (Argon2id), `SESSION_SECRET`, `COOKIE_SECURE`.
+- Env: `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH` (Argon2id), `COOKIE_SECURE`, `WEB_ORIGIN`, `SESSION_TTL` (default 8h).
+- No `SESSION_SECRET`: session tokens are opaque ≥256-bit values from `crypto/rand`, used directly as in-memory map keys (not signed/HMAC'd).
 - Opaque HttpOnly cookie `smartattend_session`; SameSite=Lax; Secure from `COOKIE_SECURE`.
-- In-memory sessions; absolute TTL 8 hours (not sliding); API restart clears sessions.
-- CSRF: validate `Origin` on unsafe methods against configured web origin.
+- CSRF + CORS: see **HTTP-01**; validate `Origin` on unsafe methods against `WEB_ORIGIN`.
 - Cap in-memory session count; periodically purge expired sessions.
 
 ### Employees (admin session)
@@ -179,7 +189,7 @@ Success payloads are resource-shaped (no generic wrapper).
 | `POST` | `/api/v1/employees` | Normalize `employee_code` |
 | `GET` | `/api/v1/employees/{id}` | |
 | `PATCH` | `/api/v1/employees/{id}` | Cannot set `enrollment_status` |
-| `DELETE` | `/api/v1/employees/{id}` | Soft-deactivate → `INACTIVE` |
+| `DELETE` | `/api/v1/employees/{id}` | Soft-deactivate → `INACTIVE`; invalidate pending enrollment sessions |
 
 ### Enrollment (admin session)
 
@@ -189,7 +199,7 @@ Success payloads are resource-shaped (no generic wrapper).
 | `POST` | `/api/v1/employees/{id}/face/enroll/{enrollment_id}/{pose}` | Multipart `image`; pose FRONT\|LEFT\|RIGHT; idempotent replace per pose |
 | `POST` | `/api/v1/employees/{id}/face/enroll/{enrollment_id}/commit` | Atomic revoke+insert when all 3 staged |
 | `POST` | `/api/v1/employees/{id}/face/enroll/{enrollment_id}/abort` | Discard staging |
-| `DELETE` | `/api/v1/employees/{id}/face` | Revoke all active; `NOT_ENROLLED` |
+| `DELETE` | `/api/v1/employees/{id}/face` | Revoke all active; `NOT_ENROLLED`; invalidate all pending enrollment sessions for that employee |
 
 Browser enrollment responses never include embeddings:
 
@@ -309,16 +319,18 @@ Login → in-memory session (8h absolute TTL) → logout / expiry / API restart 
 
 ### Enrollment
 
-- Start creates opaque `enrollment_id` (TTL 10 minutes) and records `base_templates` (active template IDs at start; empty for first enroll).
+- Start requires employee `ACTIVE`; creates opaque `enrollment_id` (TTL 10 minutes) and records `base_templates` (active template IDs at start; empty for first enroll).
 - Staging is in-memory only; DB stays `NOT_ENROLLED` or `ENROLLED` until commit.
 - Re-capture replaces the staged value for that pose only.
-- Commit: employee advisory lock → compare current active IDs to `base_templates` → if changed return `ENROLLMENT_CONFLICT` → else revoke old, insert three, set `ENROLLED`.
+- Commit: employee advisory lock → re-read employee and require `ACTIVE` → compare current active IDs to `base_templates` → if changed return `ENROLLMENT_CONFLICT` → else revoke old, insert three, set `ENROLLED`.
+- Deactivation or `DELETE .../face` invalidates all pending enrollment sessions for that employee.
 - Abort / TTL / API restart: discard staging; DB unchanged.
 - Navigation abort is best-effort; TTL is authoritative.
 
 | ID | Requirement |
 | -- | ----------- |
 | **ENROLL-02** | Enrollment staging is ephemeral and identified by an opaque `enrollment_id`. Commit uses employee-scoped serialization and optimistic comparison against the enrollment's starting active template set. Concurrent stale commits return `ENROLLMENT_CONFLICT`. |
+| **ENROLL-03** | Enrollment start and commit require employee status `ACTIVE`. Commit revalidates `ACTIVE` after acquiring the employee lock. Employee deactivation or explicit face deletion invalidates all pending enrollment sessions for that employee. |
 
 ### Verification receipt
 
@@ -342,6 +354,8 @@ States: `UNUSED` → `IN_FLIGHT` → `CONSUMED`. Business failure before success
 8. COMMIT  
 9. Mark receipt CONSUMED  
 
+**Intentional MVP-1 attendance semantics:** Beyond the same-employee + same-`event_type` cooldown, there is **no** check-in/check-out sequence enforcement. `CHECK_OUT` without a prior `CHECK_IN`, or another same-type event after the cooldown, is allowed. Shift/state machines are out of scope.  
+
 ### Employee lifecycle
 
 `ACTIVE + NOT_ENROLLED` → enroll commit → `ACTIVE + ENROLLED` → deactivate → `INACTIVE + ENROLLED` (templates retained). Reactivation restores verify eligibility without re-enrollment. Explicit face delete → revoke templates → `NOT_ENROLLED`.
@@ -350,14 +364,28 @@ States: `UNUSED` → `IN_FLIGHT` → `CONSUMED`. Business failure before success
 
 ## 5. Face-service biometric contract
 
-### Models (pinned artifacts)
+### Models (immutable MVP-1 pin)
 
-| Role | Artifact (illustrative pin) | Identity stored in DB |
-| ---- | --------------------------- | --------------------- |
-| Detector | `face_detection_yunet_*.onnx` + SHA256 | — |
-| Recognizer | `face_recognition_sface_2021dec.onnx` + SHA256 | `model_name=sface`, `model_version=2021dec`, `embedding_dim=128` |
+Chosen for **OpenCV 4.x DNN** compatibility. Zoo's newer `face_detection_yunet_2026may.onnx` targets OpenCV 5.x ONNX Runtime dynamic dims and is **not** the MVP-1 pin.
 
-Model upgrades are intentional deployments, never automatic Zoo pulls.
+```text
+OPENCV_PYTHON_PACKAGE=opencv-python-headless==4.10.0.84
+
+YUNET_MODEL=face_detection_yunet_2023mar.onnx
+YUNET_SHA256=8F2383E4DD3CFBB4553EA8718107FC0423210DC964F9F4280604804ED2552FA4
+
+SFACE_MODEL=face_recognition_sface_2021dec.onnx
+SFACE_SHA256=0BA9FBFA01B5270C96627C4EF784DA859931E02F04419C829E83484087C34E79
+
+FACE_MATCH_THRESHOLD=0.363
+```
+
+| Role | Artifact | Identity stored in DB |
+| ---- | -------- | --------------------- |
+| Detector | `face_detection_yunet_2023mar.onnx` | — |
+| Recognizer | `face_recognition_sface_2021dec.onnx` | `model_name=sface`, `model_version=2021dec`, `embedding_dim=128` |
+
+Face-service must verify SHA256 at startup and refuse to boot on mismatch. Model upgrades are intentional deployments, never automatic Zoo pulls.
 
 ### Image intake
 
@@ -488,6 +516,11 @@ User-triggered snapshot → limit dimensions → JPEG encode → verify blob ≤
 - Mobile apps / geolocation  
 - Continuous video recognition streams  
 - Production TLS/reverse-proxy deployment (MVP-1 acceptance runs on Docker Compose / localhost; production HTTPS is required later for real kiosk camera use)
+- Attendance sequence rules (CHECK_IN before CHECK_OUT, etc.) beyond same-event cooldown
+
+### Production / compliance gate (non-blocking for local MVP)
+
+OpenCV Zoo code is Apache-2.0 / MIT per directory, but pretrained weight licensing and training-data provenance for commercial employee-biometric use must be reviewed before production. Local MVP-1 development is allowed with the pinned artifacts; do not treat SFace 2021dec as automatically cleared for commercial deployment without a licensing/privacy review.
 
 ### Definition of Done (user journey)
 
@@ -530,7 +563,7 @@ User-triggered snapshot → limit dimensions → JPEG encode → verify blob ≤
 | **M1 Foundation** | Monorepo, Compose, Postgres migrations, Go/Next/face-service skeletons, healthz | Compose up; health endpoints; web loads; migrations apply |
 | **M2 Auth + Employees** | AUTH-01, employee CRUD, soft deactivate | Login cookie; CRUD; duplicate code rejected; enrollment_status not editable |
 | **M3 Camera + enroll staging** | Camera capture → Go → face embed (stub OK); enrollment_id flow | 3 poses stage; abort/TTL; no DB until commit |
-| **M4 Real YuNet/SFace enroll** | FACE-BIO-*; atomic commit; re-enroll conflict | Quality/pose rejects; ENROLLED with 3 templates; incomplete cannot commit; failed commit preserves prior; `ENROLLMENT_CONFLICT` |
+| **M4 Real YuNet/SFace enroll** | FACE-BIO-*; pinned OpenCV+ONNX manifest; atomic commit; ENROLL-03 | SHA256 verified at boot; quality/pose rejects; ENROLLED with 3 templates; inactive commit rejected; staging invalidated on deactivate/face-delete; `ENROLLMENT_CONFLICT` |
 | **M5 Verify + receipt** | FACE-VERIFY-01/02; rate limit; generic public errors | match → 200 + receipt; no-match → 200 matched=false; expiry; concurrent claim single IN_FLIGHT; biometric metadata server-side |
 | **M6 Attendance** | check-in/out, cooldown, dashboard | Only `verification_token`; identity from receipt; consume-on-success; duplicate leaves receipt usable; concurrent duplicates cannot double-insert; Phnom Penh business day |
 
@@ -570,12 +603,13 @@ smartattend/
 | ID | Section |
 | -- | ------- |
 | AUTH-01 | 1, 3, 4 |
+| HTTP-01 | 1, 3 |
 | FACE-ENROLL-01 | 1, 4, 6 |
 | FACE-VERIFY-01 | 1, 3, 5 |
 | FACE-VERIFY-02 | 3, 4 |
 | FACE-ARCH-01 | 1, 5 |
 | DATA-01 … DATA-06 | 2 |
-| ENROLL-02 | 4 |
+| ENROLL-02, ENROLL-03 | 4 |
 | VERIFY-RECEIPT-01, VERIFY-RECEIPT-02 | 4 |
 | ATTENDANCE-01 | 4 |
 | FACE-BIO-01 … FACE-BIO-06 | 5 |
