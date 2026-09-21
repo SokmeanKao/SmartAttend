@@ -149,6 +149,9 @@ func (h employeeHandlers) patch(w http.ResponseWriter, r *http.Request) {
 		writeEmployeeError(w, err)
 		return
 	}
+	if updated.Status == employee.StatusInactive {
+		h.invalidator.InvalidateEmployee(updated.ID)
+	}
 	writeJSON(w, http.StatusOK, updated)
 }
 

@@ -3,9 +3,11 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/smartattend/api/internal/auth"
 	"github.com/smartattend/api/internal/config"
+	"github.com/smartattend/api/internal/face"
 )
 
 func NewRouter(cfg config.Config, employeeStores ...employeeStore) http.Handler {
@@ -15,9 +17,20 @@ func NewRouter(cfg config.Config, employeeStores ...employeeStore) http.Handler 
 	if len(employeeStores) > 0 && employeeStores[0] != nil {
 		employeeStore = employeeStores[0]
 	}
+	enrollmentStore := face.NewMemoryEnrollmentStore(10*time.Minute, time.Now)
 	employeeAPI := employeeHandlers{
 		store:       employeeStore,
-		invalidator: noOpEmployeeInvalidator{},
+		invalidator: enrollmentInvalidator{store: enrollmentStore},
+	}
+	var templateStore faceTemplateStore = unavailableFaceTemplateStore{}
+	if configured, ok := employeeStore.(faceTemplateStore); ok {
+		templateStore = configured
+	}
+	enrollAPI := enrollHandlers{
+		employees:   employeeStore,
+		templates:   templateStore,
+		enrollments: enrollmentStore,
+		faceClient:  face.NewClient(cfg.FaceServiceURL, 5*time.Second),
 	}
 
 	mux := http.NewServeMux()
@@ -30,6 +43,11 @@ func NewRouter(cfg config.Config, employeeStores ...employeeStore) http.Handler 
 	mux.Handle("GET /api/v1/employees/{id}", requireSession(sessionStore, http.HandlerFunc(employeeAPI.get)))
 	mux.Handle("PATCH /api/v1/employees/{id}", requireSession(sessionStore, http.HandlerFunc(employeeAPI.patch)))
 	mux.Handle("DELETE /api/v1/employees/{id}", requireSession(sessionStore, http.HandlerFunc(employeeAPI.deactivate)))
+	mux.Handle("POST /api/v1/employees/{id}/face/enroll", requireSession(sessionStore, http.HandlerFunc(enrollAPI.start)))
+	mux.Handle("POST /api/v1/employees/{id}/face/enroll/{enrollment_id}/{pose}", requireSession(sessionStore, http.HandlerFunc(enrollAPI.capture)))
+	mux.Handle("POST /api/v1/employees/{id}/face/enroll/{enrollment_id}/commit", requireSession(sessionStore, http.HandlerFunc(enrollAPI.commit)))
+	mux.Handle("POST /api/v1/employees/{id}/face/enroll/{enrollment_id}/abort", requireSession(sessionStore, http.HandlerFunc(enrollAPI.abort)))
+	mux.Handle("DELETE /api/v1/employees/{id}/face", requireSession(sessionStore, http.HandlerFunc(enrollAPI.deleteFace)))
 	return CORSMiddleware(cfg)(mux)
 }
 

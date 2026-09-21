@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/smartattend/api/internal/config"
 	employeeapi "github.com/smartattend/api/internal/employee"
+	faceapi "github.com/smartattend/api/internal/face"
 )
 
 func TestEmployeeRoutesRequireAuthentication(t *testing.T) {
@@ -138,14 +140,16 @@ func authenticatedRequest(
 }
 
 type stubEmployeeStore struct {
-	employees     []employeeapi.Employee
-	created       employeeapi.CreateParams
-	createErr     error
-	listQuery     string
-	gotID         string
-	updated       employeeapi.UpdateParams
-	updateCalls   int
-	deactivatedID string
+	employees          []employeeapi.Employee
+	created            employeeapi.CreateParams
+	createErr          error
+	listQuery          string
+	gotID              string
+	updated            employeeapi.UpdateParams
+	updateCalls        int
+	deactivatedID      string
+	committedTemplates map[faceapi.Pose]faceapi.StagedTemplate
+	deletedFaceID      string
 }
 
 func (s *stubEmployeeStore) Create(_ context.Context, params employeeapi.CreateParams) (employeeapi.Employee, error) {
@@ -176,7 +180,11 @@ func (s *stubEmployeeStore) Get(_ context.Context, id string) (employeeapi.Emplo
 func (s *stubEmployeeStore) Update(_ context.Context, _ string, params employeeapi.UpdateParams) (employeeapi.Employee, error) {
 	s.updateCalls++
 	s.updated = params
-	return sampleEmployee(), nil
+	result := sampleEmployee()
+	if params.Status != nil {
+		result.Status = *params.Status
+	}
+	return result, nil
 }
 
 func (s *stubEmployeeStore) Deactivate(_ context.Context, id string) (employeeapi.Employee, error) {
@@ -184,6 +192,27 @@ func (s *stubEmployeeStore) Deactivate(_ context.Context, id string) (employeeap
 	result := sampleEmployee()
 	result.Status = employeeapi.StatusInactive
 	return result, nil
+}
+
+func (s *stubEmployeeStore) ActiveTemplateIDs(
+	_ context.Context,
+	_ string,
+) (map[faceapi.Pose]uuid.UUID, error) {
+	return map[faceapi.Pose]uuid.UUID{}, nil
+}
+
+func (s *stubEmployeeStore) CommitEnrollment(
+	_ context.Context,
+	_ string,
+	templates map[faceapi.Pose]faceapi.StagedTemplate,
+) error {
+	s.committedTemplates = templates
+	return nil
+}
+
+func (s *stubEmployeeStore) DeleteFace(_ context.Context, id string) error {
+	s.deletedFaceID = id
+	return nil
 }
 
 func sampleEmployee() employeeapi.Employee {

@@ -1,0 +1,12 @@
+# Task 6 status
+- Added thread-safe 10-minute in-memory enrollment staging with opaque IDs.
+- FRONT/LEFT/RIGHT recapture replaces only that pose; abort/expiry/invalidation discard sessions.
+- Added 5-second Go face-service client with validated float32-LE L2 embeddings.
+- Added authenticated start, capture, commit, abort, and face-delete routes.
+- Start and commit require ACTIVE; deactivation and face deletion invalidate pending sessions.
+- Complete commit transactionally replaces templates and marks the employee ENROLLED.
+- Browser capture responses contain only pose, accepted, and quality_score.
+- Added FastAPI `/internal/v1/faces/embed` fixed 128-dimension unit-vector stub.
+- TDD covered staging, expiry, replacement, ACTIVE checks, routes, commit, and invalidation.
+- `go test ./...` and `go vet ./...` pass; Python compile validation passes.
+- Race tests cannot build on this host because no CGO C compiler (`gcc`) is installed.

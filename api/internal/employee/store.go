@@ -5,9 +5,11 @@ import (
 	"errors"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/smartattend/api/internal/face"
 )
 
 const (
@@ -20,6 +22,7 @@ const (
 var (
 	ErrNotFound           = errors.New("employee not found")
 	ErrEmployeeCodeExists = errors.New("employee code already exists")
+	ErrInactive           = errors.New("employee inactive")
 )
 
 type Employee struct {
@@ -162,6 +165,108 @@ func (s *Store) Deactivate(ctx context.Context, id string) (Employee, error) {
 	)
 	employee, err := scanEmployee(row)
 	return employee, mapStoreError(err)
+}
+
+func (s *Store) ActiveTemplateIDs(ctx context.Context, employeeID string) (map[face.Pose]uuid.UUID, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT pose, id
+		FROM face_templates
+		WHERE employee_id = $1 AND revoked_at IS NULL
+	`, employeeID)
+	if err != nil {
+		return nil, mapStoreError(err)
+	}
+	defer rows.Close()
+
+	templates := make(map[face.Pose]uuid.UUID)
+	for rows.Next() {
+		var pose face.Pose
+		var id uuid.UUID
+		if err := rows.Scan(&pose, &id); err != nil {
+			return nil, err
+		}
+		templates[pose] = id
+	}
+	return templates, rows.Err()
+}
+
+func (s *Store) CommitEnrollment(
+	ctx context.Context,
+	employeeID string,
+	templates map[face.Pose]face.StagedTemplate,
+) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var status string
+	if err := tx.QueryRow(ctx, `SELECT status FROM employees WHERE id = $1`, employeeID).Scan(&status); err != nil {
+		return mapStoreError(err)
+	}
+	if status != StatusActive {
+		return ErrInactive
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE face_templates SET revoked_at = now()
+		WHERE employee_id = $1 AND revoked_at IS NULL
+	`, employeeID); err != nil {
+		return err
+	}
+	for _, pose := range []face.Pose{face.PoseFront, face.PoseLeft, face.PoseRight} {
+		tmpl, ok := templates[pose]
+		if !ok {
+			return face.ErrEnrollmentIncomplete
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO face_templates (
+				employee_id, pose, embedding, embedding_dim,
+				model_name, model_version, quality_score
+			) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`, employeeID, pose, tmpl.Embedding, tmpl.EmbeddingDim,
+			tmpl.ModelName, tmpl.ModelVersion, tmpl.QualityScore); err != nil {
+			return err
+		}
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE employees
+		SET enrollment_status = 'ENROLLED', updated_at = now()
+		WHERE id = $1
+	`, employeeID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) DeleteFace(ctx context.Context, employeeID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		UPDATE face_templates SET revoked_at = now()
+		WHERE employee_id = $1 AND revoked_at IS NULL
+	`, employeeID); err != nil {
+		return err
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE employees
+		SET enrollment_status = 'NOT_ENROLLED', updated_at = now()
+		WHERE id = $1
+	`, employeeID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit(ctx)
 }
 
 type rowScanner interface {
