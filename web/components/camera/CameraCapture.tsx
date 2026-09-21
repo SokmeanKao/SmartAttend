@@ -65,6 +65,58 @@ async function createJpeg(video: HTMLVideoElement): Promise<Blob> {
   throw new Error("The captured image is larger than 5 MiB. Please retry.");
 }
 
+function isLikelyInfraredLabel(label: string): boolean {
+  const value = label.toLowerCase();
+  return (
+    value.includes("ir camera") ||
+    value.includes("infrared") ||
+    value.includes(" windows hello") ||
+    value.includes("rgbcamerair") ||
+    /\bir\b/.test(value)
+  );
+}
+
+async function pickPreferredVideoDeviceId(): Promise<string | undefined> {
+  if (!navigator.mediaDevices?.enumerateDevices) return undefined;
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const videoInputs = devices.filter((device) => device.kind === "videoinput");
+  if (videoInputs.length === 0) return undefined;
+
+  const labeled = videoInputs.filter((device) => device.label.trim() !== "");
+  if (labeled.length === 0) return undefined;
+
+  const visible = labeled.find((device) => !isLikelyInfraredLabel(device.label));
+  return (visible ?? labeled[0])?.deviceId;
+}
+
+async function openCameraStream(): Promise<MediaStream> {
+  const preferredDeviceId = await pickPreferredVideoDeviceId();
+
+  if (preferredDeviceId) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          deviceId: { exact: preferredDeviceId },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+      });
+    } catch {
+      // Fall through to a generic facingMode request.
+    }
+  }
+
+  return navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: {
+      facingMode: "user",
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+    },
+  });
+}
+
 export function CameraCapture({
   disabled = false,
   captureLabel = "Capture photo",
@@ -78,13 +130,19 @@ export function CameraCapture({
   const [cameraActive, setCameraActive] = useState(false);
   const [error, setError] = useState("");
 
-  const stopCamera = useCallback(() => {
+  const stopTracks = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
-    if (videoRef.current) videoRef.current.srcObject = null;
+  }, []);
+
+  const stopCamera = useCallback(() => {
+    stopTracks();
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
     setCameraActive(false);
     setState("idle");
-  }, []);
+  }, [stopTracks]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -95,6 +153,23 @@ export function CameraCapture({
     };
   }, []);
 
+  // Attach/play only after the <video> is visible. Starting playback while
+  // display:none often yields a black frame on Chromium/Windows.
+  useEffect(() => {
+    const video = videoRef.current;
+    const stream = streamRef.current;
+    if (!cameraActive || !video || !stream) return;
+
+    video.srcObject = stream;
+    video.muted = true;
+    const playPromise = video.play();
+    if (playPromise !== undefined) {
+      void playPromise.catch(() => {
+        // Autoplay may reject briefly; a later user gesture / retry handles it.
+      });
+    }
+  }, [cameraActive]);
+
   async function startCamera() {
     setState("requesting_permission");
     setError("");
@@ -102,24 +177,32 @@ export function CameraCapture({
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error("Camera access is not supported by this browser.");
       }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { facingMode: "user", width: { ideal: 1280 } },
-      });
+
+      // First call may only grant permission (labels empty). Then reopen with
+      // a preferred non-IR device when labels become available.
+      let stream = await openCameraStream();
+      const labeledAfterGrant = (await navigator.mediaDevices.enumerateDevices())
+        .filter((device) => device.kind === "videoinput")
+        .some((device) => device.label.trim() !== "");
+      if (labeledAfterGrant) {
+        const preferred = await pickPreferredVideoDeviceId();
+        const currentId = stream.getVideoTracks()[0]?.getSettings().deviceId;
+        if (preferred && preferred !== currentId) {
+          stream.getTracks().forEach((track) => track.stop());
+          stream = await openCameraStream();
+        }
+      }
+
       if (!mountedRef.current) {
         stream.getTracks().forEach((track) => track.stop());
         return;
       }
+
       streamRef.current = stream;
       setCameraActive(true);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
       setState("live");
     } catch (cameraError) {
-      streamRef.current?.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
+      stopTracks();
       setCameraActive(false);
       setError(
         cameraError instanceof Error
@@ -140,6 +223,11 @@ export function CameraCapture({
     setState("capturing");
     setError("");
     try {
+      // Ensure we have frames before drawing.
+      if (!videoRef.current.videoWidth) {
+        await videoRef.current.play();
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
       const image = await createJpeg(videoRef.current);
       setState("submitting");
       await onCapture(image);
@@ -164,9 +252,13 @@ export function CameraCapture({
       <div className="relative aspect-4/3 overflow-hidden rounded-xl bg-zinc-950">
         <video
           ref={videoRef}
+          autoPlay
           muted
           playsInline
-          className={`size-full object-cover ${cameraActive ? "block" : "hidden"}`}
+          // Keep in layout (opacity) instead of display:none so frames decode.
+          className={`size-full object-cover scale-x-[-1] transition-opacity ${
+            cameraActive ? "opacity-100" : "pointer-events-none opacity-0"
+          }`}
         />
         {!cameraActive && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-zinc-300">
