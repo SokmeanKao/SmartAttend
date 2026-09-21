@@ -4,12 +4,19 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/smartattend/api/internal/auth"
 	"github.com/smartattend/api/internal/config"
 )
 
 func NewRouter(cfg config.Config) http.Handler {
+	sessionStore := auth.NewMemorySessionStore(10_000)
+	authAPI := authHandlers{cfg: cfg, store: sessionStore}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", healthHandler)
+	mux.HandleFunc("GET /healthz", healthHandler)
+	mux.HandleFunc("POST /api/v1/auth/login", authAPI.login)
+	mux.Handle("GET /api/v1/auth/me", requireSession(sessionStore, http.HandlerFunc(authAPI.me)))
+	mux.Handle("POST /api/v1/auth/logout", requireSession(sessionStore, http.HandlerFunc(authAPI.logout)))
 	return CORSMiddleware(cfg)(mux)
 }
 

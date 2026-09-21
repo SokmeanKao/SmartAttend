@@ -21,6 +21,10 @@ func CORSMiddleware(cfg config.Config) func(http.Handler) http.Handler {
 			origin := r.Header.Get("Origin")
 
 			if origin == "" {
+				if slices.Contains(unsafeMethods, r.Method) {
+					WriteError(w, http.StatusForbidden, "ORIGIN_NOT_ALLOWED", "Origin not allowed")
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			}
