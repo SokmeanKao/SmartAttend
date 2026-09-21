@@ -20,6 +20,8 @@ type CameraCaptureProps = {
   disabled?: boolean;
   captureLabel?: string;
   instruction?: string;
+  /** Open the camera as soon as the component mounts (e.g. after Continue). */
+  autoStart?: boolean;
   onCapture: (image: Blob) => Promise<void>;
 };
 
@@ -206,11 +208,13 @@ export function CameraCapture({
   disabled = false,
   captureLabel = "Capture photo",
   instruction,
+  autoStart = false,
   onCapture,
 }: CameraCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const mountedRef = useRef(true);
+  const autoStartAttemptedRef = useRef(false);
   const [state, setState] = useState<CameraState>("idle");
   const [cameraActive, setCameraActive] = useState(false);
   const [error, setError] = useState("");
@@ -248,6 +252,14 @@ export function CameraCapture({
     setCameras(options);
     return options;
   }
+
+  useEffect(() => {
+    if (!autoStart || disabled || autoStartAttemptedRef.current) return;
+    autoStartAttemptedRef.current = true;
+    void startCamera();
+    // Intentionally run once when the capture surface mounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStart, disabled]);
 
   async function startCamera(deviceId?: string) {
     setState("requesting_permission");

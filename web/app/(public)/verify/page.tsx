@@ -107,10 +107,13 @@ export default function VerifyPage() {
     return () => window.clearTimeout(timeout);
   }, [stage, verified]);
 
-  function startCamera(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function continueToCamera(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
     const normalizedCode = employeeCode.trim().toUpperCase();
-    if (!normalizedCode) return;
+    if (!normalizedCode) {
+      setError("Enter your employee code to continue.");
+      return;
+    }
 
     setEmployeeCode(normalizedCode);
     setError("");
@@ -235,12 +238,13 @@ export default function VerifyPage() {
                 <CardContent>
                   <form
                     className="mx-auto max-w-md space-y-5"
-                    onSubmit={startCamera}
+                    onSubmit={continueToCamera}
                   >
                     <div className="space-y-2">
                       <Label htmlFor="employee-code">Employee code</Label>
                       <Input
                         id="employee-code"
+                        name="employee_code"
                         value={employeeCode}
                         onChange={(event) =>
                           setEmployeeCode(event.target.value.toUpperCase())
@@ -261,7 +265,12 @@ export default function VerifyPage() {
                         {error}
                       </p>
                     )}
-                    <Button type="submit" className="h-11 w-full" size="lg">
+                    <Button
+                      type="button"
+                      className="h-11 w-full"
+                      size="lg"
+                      onClick={() => continueToCamera()}
+                    >
                       Continue
                     </Button>
                   </form>
@@ -288,6 +297,7 @@ export default function VerifyPage() {
                 </CardHeader>
                 <CardContent>
                   <CameraCapture
+                    autoStart
                     captureLabel="Capture and verify"
                     instruction="Center your face, look forward, and hold still."
                     onCapture={verifyFace}
