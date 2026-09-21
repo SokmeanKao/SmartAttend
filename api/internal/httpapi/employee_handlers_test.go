@@ -205,14 +205,21 @@ func (s *stubEmployeeStore) ActiveTemplateIDs(
 func (s *stubEmployeeStore) CommitEnrollment(
 	_ context.Context,
 	_ string,
-	_ map[faceapi.Pose]uuid.UUID,
-	templates map[faceapi.Pose]faceapi.StagedTemplate,
+	loadEnrollment employeeapi.EnrollmentLoader,
 ) error {
-	s.committedTemplates = templates
+	enrollment, err := loadEnrollment()
+	if err != nil {
+		return err
+	}
+	if err := enrollment.ValidateComplete(); err != nil {
+		return err
+	}
+	s.committedTemplates = enrollment.Templates
 	return s.commitErr
 }
 
-func (s *stubEmployeeStore) DeleteFace(_ context.Context, id string) error {
+func (s *stubEmployeeStore) DeleteFace(_ context.Context, id string, invalidate func()) error {
+	invalidate()
 	s.deletedFaceID = id
 	return nil
 }

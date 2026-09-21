@@ -62,6 +62,8 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
+type EnrollmentLoader func() (*face.Enrollment, error)
+
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
@@ -239,15 +241,8 @@ func (s *Store) ActiveTemplateIDs(ctx context.Context, employeeID string) (map[f
 func (s *Store) CommitEnrollment(
 	ctx context.Context,
 	employeeID string,
-	baseTemplateIDs map[face.Pose]uuid.UUID,
-	templates map[face.Pose]face.StagedTemplate,
+	loadEnrollment EnrollmentLoader,
 ) error {
-	for _, pose := range []face.Pose{face.PoseFront, face.PoseLeft, face.PoseRight} {
-		if _, ok := templates[pose]; !ok {
-			return face.ErrEnrollmentIncomplete
-		}
-	}
-
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -267,6 +262,17 @@ func (s *Store) CommitEnrollment(
 	}
 	if status != StatusActive {
 		return ErrInactive
+	}
+
+	enrollment, err := loadEnrollment()
+	if err != nil {
+		return err
+	}
+	if enrollment == nil || enrollment.EmployeeID.String() != employeeID {
+		return face.ErrEnrollmentExpired
+	}
+	if err := enrollment.ValidateComplete(); err != nil {
+		return err
 	}
 
 	rows, err := tx.Query(ctx, `
@@ -292,7 +298,7 @@ func (s *Store) CommitEnrollment(
 		return err
 	}
 	rows.Close()
-	if !sameTemplateIDs(activeTemplateIDs, baseTemplateIDs) {
+	if !sameTemplateIDs(activeTemplateIDs, enrollment.BaseTemplateIDs) {
 		return face.ErrEnrollmentConflict
 	}
 
@@ -303,7 +309,7 @@ func (s *Store) CommitEnrollment(
 		return err
 	}
 	for _, pose := range []face.Pose{face.PoseFront, face.PoseLeft, face.PoseRight} {
-		tmpl := templates[pose]
+		tmpl := enrollment.Templates[pose]
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO face_templates (
 				employee_id, pose, embedding, embedding_dim,
@@ -348,7 +354,7 @@ func lockEmployee(ctx context.Context, tx pgx.Tx, employeeID string) error {
 	return err
 }
 
-func (s *Store) DeleteFace(ctx context.Context, employeeID string) error {
+func (s *Store) DeleteFace(ctx context.Context, employeeID string, invalidate func()) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -356,6 +362,9 @@ func (s *Store) DeleteFace(ctx context.Context, employeeID string) error {
 	defer tx.Rollback(ctx)
 	if err := lockEmployee(ctx, tx, employeeID); err != nil {
 		return err
+	}
+	if invalidate != nil {
+		invalidate()
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE face_templates SET revoked_at = now()

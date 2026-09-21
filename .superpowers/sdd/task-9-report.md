@@ -13,3 +13,9 @@
 - Deterministic commit-vs-deactivate test proves a waiting commit rejects the now-inactive employee without inserting templates.
 - `go test ./internal/employee/... ./internal/httpapi/... -count=1`: passed.
 - Docker CGO `-race` for employee/httpapi packages: passed.
+
+## M4 gate follow-up
+- Commit reloads the enrollment session only after obtaining the employee advisory and row locks.
+- Face deletion invalidates pending sessions while holding the same advisory lock.
+- Deterministic face-delete-vs-commit test proves the waiting initial commit returns `ENROLLMENT_EXPIRED`.
+- `go test ./... -count=1` and Docker CGO employee/httpapi `-race`: passed.

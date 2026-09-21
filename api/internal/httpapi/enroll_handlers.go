@@ -19,10 +19,9 @@ type faceTemplateStore interface {
 	CommitEnrollment(
 		context.Context,
 		string,
-		map[face.Pose]uuid.UUID,
-		map[face.Pose]face.StagedTemplate,
+		employee.EnrollmentLoader,
 	) error
-	DeleteFace(context.Context, string) error
+	DeleteFace(context.Context, string, func()) error
 }
 
 type faceEmbedder interface {
@@ -121,27 +120,29 @@ func (h enrollHandlers) capture(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h enrollHandlers) commit(w http.ResponseWriter, r *http.Request) {
-	enrollment, _, ok := h.enrollmentForRequest(w, r)
+	employeeID, _, ok := h.activeEmployee(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
-	if err := enrollment.ValidateComplete(); err != nil {
-		writeEnrollmentError(w, err)
-		return
-	}
-	if _, _, ok := h.activeEmployee(w, r, r.PathValue("id")); !ok {
-		return
-	}
+	enrollmentID := r.PathValue("enrollment_id")
 	if err := h.templates.CommitEnrollment(
 		r.Context(),
 		r.PathValue("id"),
-		enrollment.BaseTemplateIDs,
-		enrollment.Templates,
+		func() (*face.Enrollment, error) {
+			enrollment, err := h.enrollments.Get(enrollmentID)
+			if err != nil {
+				return nil, err
+			}
+			if enrollment.EmployeeID != employeeID {
+				return nil, face.ErrEnrollmentExpired
+			}
+			return enrollment, nil
+		},
 	); err != nil {
 		writeEnrollmentError(w, err)
 		return
 	}
-	h.enrollments.Abort(enrollment.ID)
+	h.enrollments.Abort(enrollmentID)
 	writeJSON(w, http.StatusOK, map[string]any{"enrollment_status": employee.EnrollmentEnrolled})
 }
 
@@ -160,12 +161,14 @@ func (h enrollHandlers) deleteFace(w http.ResponseWriter, r *http.Request) {
 		writeEmployeeError(w, err)
 		return
 	}
-	if err := h.templates.DeleteFace(r.Context(), found.ID); err != nil {
+	employeeID, parseErr := uuid.Parse(found.ID)
+	if err := h.templates.DeleteFace(r.Context(), found.ID, func() {
+		if parseErr == nil {
+			h.enrollments.InvalidateEmployee(employeeID)
+		}
+	}); err != nil {
 		writeEnrollmentError(w, err)
 		return
-	}
-	if employeeID, err := uuid.Parse(found.ID); err == nil {
-		h.enrollments.InvalidateEmployee(employeeID)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -244,12 +247,11 @@ func (unavailableFaceTemplateStore) ActiveTemplateIDs(context.Context, string) (
 func (unavailableFaceTemplateStore) CommitEnrollment(
 	context.Context,
 	string,
-	map[face.Pose]uuid.UUID,
-	map[face.Pose]face.StagedTemplate,
+	employee.EnrollmentLoader,
 ) error {
 	return errors.New("face template store unavailable")
 }
-func (unavailableFaceTemplateStore) DeleteFace(context.Context, string) error {
+func (unavailableFaceTemplateStore) DeleteFace(context.Context, string, func()) error {
 	return errors.New("face template store unavailable")
 }
 

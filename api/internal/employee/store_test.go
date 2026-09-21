@@ -114,7 +114,11 @@ func TestConcurrentEnrollmentCommitsRejectStaleBaseTemplates(t *testing.T) {
 		go func() {
 			ready.Done()
 			<-start
-			results <- store.CommitEnrollment(ctx, created.ID, base, stagedTemplates(marker))
+			results <- store.CommitEnrollment(
+				ctx,
+				created.ID,
+				testEnrollmentLoader(created.ID, base, stagedTemplates(marker)),
+			)
 		}()
 	}
 	ready.Wait()
@@ -141,7 +145,11 @@ func TestFailedEnrollmentCommitPreservesPriorEnrollment(t *testing.T) {
 	store := newIntegrationStore(t)
 	ctx := context.Background()
 	created := createTestEmployee(t, store, "ROLLBACK")
-	if err := store.CommitEnrollment(ctx, created.ID, nil, stagedTemplates(1)); err != nil {
+	if err := store.CommitEnrollment(
+		ctx,
+		created.ID,
+		testEnrollmentLoader(created.ID, nil, stagedTemplates(1)),
+	); err != nil {
 		t.Fatalf("initial CommitEnrollment() error = %v", err)
 	}
 	base, err := store.ActiveTemplateIDs(ctx, created.ID)
@@ -153,7 +161,11 @@ func TestFailedEnrollmentCommitPreservesPriorEnrollment(t *testing.T) {
 	bad := invalid[face.PoseRight]
 	bad.QualityScore = 2
 	invalid[face.PoseRight] = bad
-	if err := store.CommitEnrollment(ctx, created.ID, base, invalid); err == nil {
+	if err := store.CommitEnrollment(
+		ctx,
+		created.ID,
+		testEnrollmentLoader(created.ID, base, invalid),
+	); err == nil {
 		t.Fatal("CommitEnrollment() error = nil, want insert failure")
 	}
 
@@ -175,7 +187,11 @@ func TestEnrollmentCommitRejectsInactiveEmployee(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := store.CommitEnrollment(ctx, created.ID, nil, stagedTemplates(1))
+	err := store.CommitEnrollment(
+		ctx,
+		created.ID,
+		testEnrollmentLoader(created.ID, nil, stagedTemplates(1)),
+	)
 	if !errors.Is(err, ErrInactive) {
 		t.Fatalf("CommitEnrollment() error = %v, want ErrInactive", err)
 	}
@@ -209,7 +225,11 @@ func TestEnrollmentCommitWaitsForConcurrentDeactivate(t *testing.T) {
 
 	commitResult := make(chan error, 1)
 	go func() {
-		commitResult <- store.CommitEnrollment(ctx, created.ID, nil, stagedTemplates(1))
+		commitResult <- store.CommitEnrollment(
+			ctx,
+			created.ID,
+			testEnrollmentLoader(created.ID, nil, stagedTemplates(1)),
+		)
 	}()
 
 	if err := blocker.Commit(ctx); err != nil {
@@ -233,6 +253,62 @@ func TestEnrollmentCommitWaitsForConcurrentDeactivate(t *testing.T) {
 	assertActiveTemplateSet(t, store, created.ID, 0)
 }
 
+func TestEnrollmentCommitFailsAfterConcurrentFaceDeleteInvalidatesSession(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	created := createTestEmployee(t, store, "FACE_DELETE_RACE")
+	employeeID := uuid.MustParse(created.ID)
+	enrollments := face.NewMemoryEnrollmentStore(10*time.Minute, time.Now)
+	enrollmentID, err := enrollments.Start(employeeID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pose, tmpl := range stagedTemplates(1) {
+		if err := enrollments.Capture(enrollmentID, pose, tmpl); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	blocker, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback(ctx)
+	var lockedID string
+	if err := blocker.QueryRow(ctx,
+		`SELECT id FROM employees WHERE id = $1 FOR UPDATE`,
+		created.ID,
+	).Scan(&lockedID); err != nil {
+		t.Fatal(err)
+	}
+
+	deleteResult := make(chan error, 1)
+	go func() {
+		deleteResult <- store.DeleteFace(ctx, created.ID, func() {
+			enrollments.InvalidateEmployee(employeeID)
+		})
+	}()
+	waitForAdvisoryLock(t, store)
+
+	commitResult := make(chan error, 1)
+	go func() {
+		commitResult <- store.CommitEnrollment(ctx, created.ID, func() (*face.Enrollment, error) {
+			return enrollments.Get(enrollmentID)
+		})
+	}()
+
+	if err := blocker.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-deleteResult; err != nil {
+		t.Fatalf("DeleteFace() error = %v", err)
+	}
+	if err := <-commitResult; !errors.Is(err, face.ErrEnrollmentExpired) {
+		t.Fatalf("CommitEnrollment() error = %v, want ErrEnrollmentExpired", err)
+	}
+	assertActiveTemplateSet(t, store, created.ID, 0)
+}
+
 func TestIncompleteEnrollmentCannotCommit(t *testing.T) {
 	store := newIntegrationStore(t)
 	ctx := context.Background()
@@ -240,7 +316,11 @@ func TestIncompleteEnrollmentCannotCommit(t *testing.T) {
 	templates := stagedTemplates(1)
 	delete(templates, face.PoseRight)
 
-	err := store.CommitEnrollment(ctx, created.ID, nil, templates)
+	err := store.CommitEnrollment(
+		ctx,
+		created.ID,
+		testEnrollmentLoader(created.ID, nil, templates),
+	)
 	if !errors.Is(err, face.ErrEnrollmentIncomplete) {
 		t.Fatalf("CommitEnrollment() error = %v, want ErrEnrollmentIncomplete", err)
 	}
@@ -332,6 +412,20 @@ func stagedTemplates(marker byte) map[face.Pose]face.StagedTemplate {
 		}
 	}
 	return result
+}
+
+func testEnrollmentLoader(
+	employeeID string,
+	baseTemplateIDs map[face.Pose]uuid.UUID,
+	templates map[face.Pose]face.StagedTemplate,
+) EnrollmentLoader {
+	return func() (*face.Enrollment, error) {
+		return &face.Enrollment{
+			EmployeeID:      uuid.MustParse(employeeID),
+			BaseTemplateIDs: baseTemplateIDs,
+			Templates:       templates,
+		}, nil
+	}
 }
 
 func assertActiveTemplateSet(t *testing.T, store *Store, employeeID string, want int) {
