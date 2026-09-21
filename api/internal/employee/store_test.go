@@ -1,13 +1,17 @@
 package employee
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/smartattend/api/internal/face"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -92,6 +96,106 @@ func TestStoreReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestConcurrentEnrollmentCommitsRejectStaleBaseTemplates(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	created := createTestEmployee(t, store, "CONCURRENT")
+	base, err := store.ActiveTemplateIDs(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results := make(chan error, 2)
+	start := make(chan struct{})
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for _, marker := range []byte{1, 2} {
+		marker := marker
+		go func() {
+			ready.Done()
+			<-start
+			results <- store.CommitEnrollment(ctx, created.ID, base, stagedTemplates(marker))
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	var succeeded, conflicted int
+	for range 2 {
+		switch err := <-results; {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, face.ErrEnrollmentConflict):
+			conflicted++
+		default:
+			t.Fatalf("CommitEnrollment() error = %v", err)
+		}
+	}
+	if succeeded != 1 || conflicted != 1 {
+		t.Fatalf("commit results = %d success, %d conflict; want 1 each", succeeded, conflicted)
+	}
+	assertActiveTemplateSet(t, store, created.ID, 3)
+}
+
+func TestFailedEnrollmentCommitPreservesPriorEnrollment(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	created := createTestEmployee(t, store, "ROLLBACK")
+	if err := store.CommitEnrollment(ctx, created.ID, nil, stagedTemplates(1)); err != nil {
+		t.Fatalf("initial CommitEnrollment() error = %v", err)
+	}
+	base, err := store.ActiveTemplateIDs(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	invalid := stagedTemplates(2)
+	bad := invalid[face.PoseRight]
+	bad.QualityScore = 2
+	invalid[face.PoseRight] = bad
+	if err := store.CommitEnrollment(ctx, created.ID, base, invalid); err == nil {
+		t.Fatal("CommitEnrollment() error = nil, want insert failure")
+	}
+
+	current, err := store.ActiveTemplateIDs(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !templateIDsEqual(current, base) {
+		t.Fatalf("active template IDs changed after failed commit: got %v, want %v", current, base)
+	}
+	assertActiveTemplateSet(t, store, created.ID, 3)
+}
+
+func TestEnrollmentCommitRejectsInactiveEmployee(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	created := createTestEmployee(t, store, "INACTIVE")
+	if _, err := store.Deactivate(ctx, created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.CommitEnrollment(ctx, created.ID, nil, stagedTemplates(1))
+	if !errors.Is(err, ErrInactive) {
+		t.Fatalf("CommitEnrollment() error = %v, want ErrInactive", err)
+	}
+	assertActiveTemplateSet(t, store, created.ID, 0)
+}
+
+func TestIncompleteEnrollmentCannotCommit(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	created := createTestEmployee(t, store, "INCOMPLETE")
+	templates := stagedTemplates(1)
+	delete(templates, face.PoseRight)
+
+	err := store.CommitEnrollment(ctx, created.ID, nil, templates)
+	if !errors.Is(err, face.ErrEnrollmentIncomplete) {
+		t.Fatalf("CommitEnrollment() error = %v, want ErrEnrollmentIncomplete", err)
+	}
+	assertActiveTemplateSet(t, store, created.ID, 0)
+}
+
 func newIntegrationStore(t *testing.T) *Store {
 	t.Helper()
 	ctx := context.Background()
@@ -130,6 +234,81 @@ func newIntegrationStore(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	return NewStore(pool)
+}
+
+func createTestEmployee(t *testing.T, store *Store, code string) Employee {
+	t.Helper()
+	created, err := store.Create(context.Background(), CreateParams{
+		EmployeeCode: code,
+		FirstName:    "Test",
+		LastName:     "Employee",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return created
+}
+
+func stagedTemplates(marker byte) map[face.Pose]face.StagedTemplate {
+	result := make(map[face.Pose]face.StagedTemplate, 3)
+	for _, pose := range []face.Pose{face.PoseFront, face.PoseLeft, face.PoseRight} {
+		result[pose] = face.StagedTemplate{
+			Embedding:    []byte{marker, byte(len(pose)), 0, 0},
+			EmbeddingDim: 1,
+			ModelName:    "sface",
+			ModelVersion: "2021dec",
+			QualityScore: 0.9,
+		}
+	}
+	return result
+}
+
+func assertActiveTemplateSet(t *testing.T, store *Store, employeeID string, want int) {
+	t.Helper()
+	rows, err := store.pool.Query(context.Background(), `
+		SELECT embedding
+		FROM face_templates
+		WHERE employee_id = $1 AND revoked_at IS NULL
+	`, employeeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var count int
+	var marker byte
+	for rows.Next() {
+		var embedding []byte
+		if err := rows.Scan(&embedding); err != nil {
+			t.Fatal(err)
+		}
+		if len(embedding) == 0 {
+			t.Fatal("active template has empty embedding")
+		}
+		if count == 0 {
+			marker = embedding[0]
+		} else if !bytes.Equal(embedding[:1], []byte{marker}) {
+			t.Fatalf("active set mixes commit markers: first %d, got %d", marker, embedding[0])
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if count != want {
+		t.Fatalf("active template count = %d, want %d", count, want)
+	}
+}
+
+func templateIDsEqual(left, right map[face.Pose]uuid.UUID) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for pose, id := range left {
+		if right[pose] != id {
+			return false
+		}
+	}
+	return true
 }
 
 func stringPointer(value string) *string {

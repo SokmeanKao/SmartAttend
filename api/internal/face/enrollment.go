@@ -21,6 +21,7 @@ const (
 var (
 	ErrEnrollmentExpired    = errors.New("enrollment expired")
 	ErrEnrollmentIncomplete = errors.New("enrollment incomplete")
+	ErrEnrollmentConflict   = errors.New("enrollment conflict")
 	ErrInvalidPose          = errors.New("invalid pose")
 )
 

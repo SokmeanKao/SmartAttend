@@ -16,7 +16,12 @@ const maxEnrollmentImageBytes = 5 << 20
 
 type faceTemplateStore interface {
 	ActiveTemplateIDs(context.Context, string) (map[face.Pose]uuid.UUID, error)
-	CommitEnrollment(context.Context, string, map[face.Pose]face.StagedTemplate) error
+	CommitEnrollment(
+		context.Context,
+		string,
+		map[face.Pose]uuid.UUID,
+		map[face.Pose]face.StagedTemplate,
+	) error
 	DeleteFace(context.Context, string) error
 }
 
@@ -127,7 +132,12 @@ func (h enrollHandlers) commit(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := h.activeEmployee(w, r, r.PathValue("id")); !ok {
 		return
 	}
-	if err := h.templates.CommitEnrollment(r.Context(), r.PathValue("id"), enrollment.Templates); err != nil {
+	if err := h.templates.CommitEnrollment(
+		r.Context(),
+		r.PathValue("id"),
+		enrollment.BaseTemplateIDs,
+		enrollment.Templates,
+	); err != nil {
 		writeEnrollmentError(w, err)
 		return
 	}
@@ -211,6 +221,8 @@ func writeEnrollmentError(w http.ResponseWriter, err error) {
 		WriteError(w, http.StatusConflict, "EMPLOYEE_INACTIVE", "Employee is inactive")
 	case errors.Is(err, face.ErrEnrollmentIncomplete):
 		WriteError(w, http.StatusConflict, "ENROLLMENT_INCOMPLETE", "All required poses must be captured")
+	case errors.Is(err, face.ErrEnrollmentConflict):
+		WriteError(w, http.StatusConflict, "ENROLLMENT_CONFLICT", "Enrollment changed; start again")
 	case errors.Is(err, face.ErrEnrollmentExpired):
 		WriteError(w, http.StatusGone, "ENROLLMENT_EXPIRED", "Enrollment expired")
 	case errors.Is(err, face.ErrInvalidPose):
@@ -229,7 +241,12 @@ type unavailableFaceTemplateStore struct{}
 func (unavailableFaceTemplateStore) ActiveTemplateIDs(context.Context, string) (map[face.Pose]uuid.UUID, error) {
 	return nil, errors.New("face template store unavailable")
 }
-func (unavailableFaceTemplateStore) CommitEnrollment(context.Context, string, map[face.Pose]face.StagedTemplate) error {
+func (unavailableFaceTemplateStore) CommitEnrollment(
+	context.Context,
+	string,
+	map[face.Pose]uuid.UUID,
+	map[face.Pose]face.StagedTemplate,
+) error {
 	return errors.New("face template store unavailable")
 }
 func (unavailableFaceTemplateStore) DeleteFace(context.Context, string) error {

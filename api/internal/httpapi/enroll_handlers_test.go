@@ -79,6 +79,36 @@ func TestEmployeePatchInactiveInvalidatesPendingEnrollment(t *testing.T) {
 	assertErrorCode(t, captured, "ENROLLMENT_EXPIRED")
 }
 
+func TestDeleteFaceInvalidatesPendingEnrollment(t *testing.T) {
+	store := &stubEmployeeStore{employees: []employeeapi.Employee{sampleEmployee()}}
+	cfg := authTestConfig()
+	handler := NewRouter(cfg, store)
+	cookie := login(t, handler, cfg)
+	employeeID := sampleEmployee().ID
+
+	start := authenticatedRequest(t, handler, cfg, cookie, http.MethodPost,
+		"/api/v1/employees/"+employeeID+"/face/enroll", "")
+	var started struct {
+		EnrollmentID string `json:"enrollment_id"`
+	}
+	if err := json.Unmarshal(start.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted := authenticatedRequest(t, handler, cfg, cookie, http.MethodDelete,
+		"/api/v1/employees/"+employeeID+"/face", "")
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d; body = %s", deleted.Code, deleted.Body.String())
+	}
+
+	capturePath := "/api/v1/employees/" + employeeID + "/face/enroll/" + started.EnrollmentID + "/FRONT"
+	captured := enrollmentMultipartRequest(t, handler, cfg, cookie, capturePath)
+	if captured.Code != http.StatusGone {
+		t.Fatalf("capture status = %d, want 410; body = %s", captured.Code, captured.Body.String())
+	}
+	assertErrorCode(t, captured, "ENROLLMENT_EXPIRED")
+}
+
 func TestEnrollmentCaptureCommitAndDeleteFace(t *testing.T) {
 	faceServer := newFaceStub(t)
 	defer faceServer.Close()
@@ -137,6 +167,79 @@ func TestEnrollmentCaptureCommitAndDeleteFace(t *testing.T) {
 	if deleted.Code != http.StatusNoContent || store.deletedFaceID != employeeID {
 		t.Fatalf("delete status/id = %d/%q", deleted.Code, store.deletedFaceID)
 	}
+}
+
+func TestEnrollmentCommitReturnsConflictForStaleBaseTemplates(t *testing.T) {
+	faceServer := newFaceStub(t)
+	defer faceServer.Close()
+
+	store := &stubEmployeeStore{
+		employees: []employeeapi.Employee{sampleEmployee()},
+		commitErr: faceapi.ErrEnrollmentConflict,
+	}
+	cfg := authTestConfig()
+	cfg.FaceServiceURL = faceServer.URL
+	handler := NewRouter(cfg, store)
+	cookie := login(t, handler, cfg)
+	commitPath := prepareCompleteEnrollment(t, handler, cfg, cookie, sampleEmployee().ID)
+
+	committed := authenticatedRequest(t, handler, cfg, cookie, http.MethodPost, commitPath, "")
+	if committed.Code != http.StatusConflict {
+		t.Fatalf("commit status = %d, want 409; body = %s", committed.Code, committed.Body.String())
+	}
+	assertErrorCode(t, committed, "ENROLLMENT_CONFLICT")
+}
+
+func TestEnrollmentCommitRejectsEmployeeDeactivatedAfterStart(t *testing.T) {
+	faceServer := newFaceStub(t)
+	defer faceServer.Close()
+
+	store := &stubEmployeeStore{employees: []employeeapi.Employee{sampleEmployee()}}
+	cfg := authTestConfig()
+	cfg.FaceServiceURL = faceServer.URL
+	handler := NewRouter(cfg, store)
+	cookie := login(t, handler, cfg)
+	employeeID := sampleEmployee().ID
+	commitPath := prepareCompleteEnrollment(t, handler, cfg, cookie, employeeID)
+	store.employees[0].Status = employeeapi.StatusInactive
+
+	committed := authenticatedRequest(t, handler, cfg, cookie, http.MethodPost, commitPath, "")
+	if committed.Code != http.StatusConflict {
+		t.Fatalf("commit status = %d, want 409; body = %s", committed.Code, committed.Body.String())
+	}
+	assertErrorCode(t, committed, "EMPLOYEE_INACTIVE")
+	if store.committedTemplates != nil {
+		t.Fatal("inactive enrollment reached CommitEnrollment")
+	}
+}
+
+func prepareCompleteEnrollment(
+	t *testing.T,
+	handler http.Handler,
+	cfg config.Config,
+	cookie *http.Cookie,
+	employeeID string,
+) string {
+	t.Helper()
+	start := authenticatedRequest(t, handler, cfg, cookie, http.MethodPost,
+		"/api/v1/employees/"+employeeID+"/face/enroll", "")
+	if start.Code != http.StatusCreated {
+		t.Fatalf("start status = %d; body = %s", start.Code, start.Body.String())
+	}
+	var started struct {
+		EnrollmentID string `json:"enrollment_id"`
+	}
+	if err := json.Unmarshal(start.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	for _, pose := range []faceapi.Pose{faceapi.PoseFront, faceapi.PoseLeft, faceapi.PoseRight} {
+		path := "/api/v1/employees/" + employeeID + "/face/enroll/" + started.EnrollmentID + "/" + string(pose)
+		captured := enrollmentMultipartRequest(t, handler, cfg, cookie, path)
+		if captured.Code != http.StatusOK {
+			t.Fatalf("%s capture status = %d; body = %s", pose, captured.Code, captured.Body.String())
+		}
+	}
+	return "/api/v1/employees/" + employeeID + "/face/enroll/" + started.EnrollmentID + "/commit"
 }
 
 func enrollmentMultipartRequest(

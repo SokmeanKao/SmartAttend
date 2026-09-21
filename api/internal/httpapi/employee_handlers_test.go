@@ -149,6 +149,7 @@ type stubEmployeeStore struct {
 	updateCalls        int
 	deactivatedID      string
 	committedTemplates map[faceapi.Pose]faceapi.StagedTemplate
+	commitErr          error
 	deletedFaceID      string
 }
 
@@ -204,10 +205,11 @@ func (s *stubEmployeeStore) ActiveTemplateIDs(
 func (s *stubEmployeeStore) CommitEnrollment(
 	_ context.Context,
 	_ string,
+	_ map[faceapi.Pose]uuid.UUID,
 	templates map[faceapi.Pose]faceapi.StagedTemplate,
 ) error {
 	s.committedTemplates = templates
-	return nil
+	return s.commitErr
 }
 
 func (s *stubEmployeeStore) DeleteFace(_ context.Context, id string) error {

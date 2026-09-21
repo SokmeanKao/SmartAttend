@@ -193,13 +193,27 @@ func (s *Store) ActiveTemplateIDs(ctx context.Context, employeeID string) (map[f
 func (s *Store) CommitEnrollment(
 	ctx context.Context,
 	employeeID string,
+	baseTemplateIDs map[face.Pose]uuid.UUID,
 	templates map[face.Pose]face.StagedTemplate,
 ) error {
+	for _, pose := range []face.Pose{face.PoseFront, face.PoseLeft, face.PoseRight} {
+		if _, ok := templates[pose]; !ok {
+			return face.ErrEnrollmentIncomplete
+		}
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`,
+		employeeID,
+	); err != nil {
+		return err
+	}
 
 	var status string
 	if err := tx.QueryRow(ctx, `SELECT status FROM employees WHERE id = $1`, employeeID).Scan(&status); err != nil {
@@ -208,6 +222,34 @@ func (s *Store) CommitEnrollment(
 	if status != StatusActive {
 		return ErrInactive
 	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT pose, id
+		FROM face_templates
+		WHERE employee_id = $1 AND revoked_at IS NULL
+	`, employeeID)
+	if err != nil {
+		return err
+	}
+	activeTemplateIDs := make(map[face.Pose]uuid.UUID)
+	for rows.Next() {
+		var pose face.Pose
+		var id uuid.UUID
+		if err := rows.Scan(&pose, &id); err != nil {
+			rows.Close()
+			return err
+		}
+		activeTemplateIDs[pose] = id
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if !sameTemplateIDs(activeTemplateIDs, baseTemplateIDs) {
+		return face.ErrEnrollmentConflict
+	}
+
 	if _, err := tx.Exec(ctx, `
 		UPDATE face_templates SET revoked_at = now()
 		WHERE employee_id = $1 AND revoked_at IS NULL
@@ -215,10 +257,7 @@ func (s *Store) CommitEnrollment(
 		return err
 	}
 	for _, pose := range []face.Pose{face.PoseFront, face.PoseLeft, face.PoseRight} {
-		tmpl, ok := templates[pose]
-		if !ok {
-			return face.ErrEnrollmentIncomplete
-		}
+		tmpl := templates[pose]
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO face_templates (
 				employee_id, pose, embedding, embedding_dim,
@@ -243,12 +282,30 @@ func (s *Store) CommitEnrollment(
 	return tx.Commit(ctx)
 }
 
+func sameTemplateIDs(left, right map[face.Pose]uuid.UUID) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for pose, id := range left {
+		if right[pose] != id {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Store) DeleteFace(ctx context.Context, employeeID string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`,
+		employeeID,
+	); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE face_templates SET revoked_at = now()
 		WHERE employee_id = $1 AND revoked_at IS NULL
