@@ -6,7 +6,7 @@ import pytest
 from PIL import Image
 
 from app.config import Settings
-from app.embedding.codec import decode_embedding
+from app.embedding.codec import decode_embedding, encode_embedding
 from app.errors import FacePipelineError
 from app.pipeline import EmbeddingPipeline
 from app.quality.checks import assess_face_quality, decode_image
@@ -155,6 +155,79 @@ def test_pipeline_rejects_wrong_expected_pose():
         pipeline.embed(_png_bytes(), "LEFT")
 
     assert error.value.code == "INVALID_POSE"
+
+
+def test_verify_uses_maximum_cosine_similarity_and_threshold():
+    settings = Settings(
+        min_sharpness=0.0,
+        min_quality=0.0,
+        min_exposure=0.0,
+        max_exposure=255.0,
+        face_match_threshold=0.363,
+    )
+    pipeline = EmbeddingPipeline(
+        settings=settings,
+        detector=_Detector(),
+        recognizer=_Recognizer(),
+    )
+    live = np.arange(1, 129, dtype=np.float32)
+    live /= np.linalg.norm(live)
+    low = -live
+    high = live.copy()
+
+    result = pipeline.verify(
+        _png_bytes(),
+        [
+            {
+                "pose": "LEFT",
+                "embedding": encode_embedding(low),
+                "embedding_encoding": "float32-le-base64",
+                "embedding_dim": 128,
+                "model_name": "sface",
+                "model_version": "2021dec",
+            },
+            {
+                "pose": "FRONT",
+                "embedding": encode_embedding(high),
+                "embedding_encoding": "float32-le-base64",
+                "embedding_dim": 128,
+                "model_name": "sface",
+                "model_version": "2021dec",
+            },
+        ],
+    )
+
+    assert result.matched is True
+    assert result.best_score == pytest.approx(1.0)
+    assert result.matched_pose == "FRONT"
+    assert not hasattr(result, "embedding")
+
+
+def test_verify_rejects_model_mismatch():
+    settings = Settings(
+        min_sharpness=0.0,
+        min_quality=0.0,
+        min_exposure=0.0,
+        max_exposure=255.0,
+    )
+    pipeline = EmbeddingPipeline(
+        settings=settings,
+        detector=_Detector(),
+        recognizer=_Recognizer(),
+    )
+    reference = {
+        "pose": "FRONT",
+        "embedding": encode_embedding(np.ones(128, dtype=np.float32) / np.sqrt(128)),
+        "embedding_encoding": "float32-le-base64",
+        "embedding_dim": 128,
+        "model_name": "other-model",
+        "model_version": "2021dec",
+    }
+
+    with pytest.raises(FacePipelineError) as error:
+        pipeline.verify(_png_bytes(), [reference])
+
+    assert error.value.code == "MODEL_VERSION_MISMATCH"
 
 
 def test_real_yunet_sface_positive_path_when_models_are_available():

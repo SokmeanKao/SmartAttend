@@ -80,3 +80,54 @@ func TestClientEmbedRejectsMalformedEmbedding(t *testing.T) {
 		t.Fatal("Embed() error = nil, want malformed embedding error")
 	}
 }
+
+func TestClientVerifySendsReferencesAndReturnsDecision(t *testing.T) {
+	embedding := make([]byte, 128*4)
+	binary.LittleEndian.PutUint32(embedding[:4], math.Float32bits(1))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/faces/verify" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm() error = %v", err)
+		}
+		var references struct {
+			Templates []map[string]any `json:"templates"`
+		}
+		if err := json.Unmarshal([]byte(r.FormValue("references")), &references); err != nil {
+			t.Fatalf("references JSON error = %v", err)
+		}
+		if len(references.Templates) != 1 ||
+			references.Templates[0]["embedding"] == "" {
+			t.Fatalf("references = %#v", references)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"matched":       true,
+			"best_score":    0.91,
+			"matched_pose":  "FRONT",
+			"model_name":    "sface",
+			"model_version": "2021dec",
+		})
+	}))
+	defer server.Close()
+
+	result, err := NewClient(server.URL, time.Second).Verify(
+		context.Background(),
+		[]byte("image-bytes"),
+		"face.jpg",
+		"image/jpeg",
+		[]ReferenceTemplate{{
+			Pose: PoseFront,
+			StagedTemplate: StagedTemplate{
+				Embedding: embedding, EmbeddingDim: 128,
+				ModelName: "sface", ModelVersion: "2021dec",
+			},
+		}},
+	)
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if !result.Matched || result.BestScore != 0.91 || result.MatchedPose != PoseFront {
+		t.Fatalf("result = %#v", result)
+	}
+}

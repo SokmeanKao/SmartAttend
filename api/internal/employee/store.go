@@ -39,6 +39,11 @@ type Employee struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
+type VerificationCandidate struct {
+	Employee  Employee
+	Templates []face.ReferenceTemplate
+}
+
 type CreateParams struct {
 	EmployeeCode string
 	FirstName    string
@@ -126,6 +131,50 @@ func (s *Store) Get(ctx context.Context, id string) (Employee, error) {
 	`, id)
 	employee, err := scanEmployee(row)
 	return employee, mapStoreError(err)
+}
+
+func (s *Store) FindVerificationCandidate(
+	ctx context.Context,
+	employeeCode string,
+) (VerificationCandidate, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT `+employeeColumns+`
+		FROM employees
+		WHERE employee_code = $1
+	`, NormalizeEmployeeCode(employeeCode))
+	found, err := scanEmployee(row)
+	if err != nil {
+		return VerificationCandidate{}, mapStoreError(err)
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT pose, embedding, embedding_dim, model_name, model_version, quality_score
+		FROM face_templates
+		WHERE employee_id = $1 AND revoked_at IS NULL
+		ORDER BY pose
+	`, found.ID)
+	if err != nil {
+		return VerificationCandidate{}, err
+	}
+	defer rows.Close()
+	templates := make([]face.ReferenceTemplate, 0, 3)
+	for rows.Next() {
+		var template face.ReferenceTemplate
+		if err := rows.Scan(
+			&template.Pose,
+			&template.Embedding,
+			&template.EmbeddingDim,
+			&template.ModelName,
+			&template.ModelVersion,
+			&template.QualityScore,
+		); err != nil {
+			return VerificationCandidate{}, err
+		}
+		templates = append(templates, template)
+	}
+	if err := rows.Err(); err != nil {
+		return VerificationCandidate{}, err
+	}
+	return VerificationCandidate{Employee: found, Templates: templates}, nil
 }
 
 func (s *Store) Update(

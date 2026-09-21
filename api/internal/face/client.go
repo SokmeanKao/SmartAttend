@@ -32,6 +32,19 @@ type EmbedResult struct {
 	Template     StagedTemplate
 }
 
+type ReferenceTemplate struct {
+	Pose Pose
+	StagedTemplate
+}
+
+type VerifyResult struct {
+	Matched      bool    `json:"matched"`
+	BestScore    float32 `json:"best_score"`
+	MatchedPose  Pose    `json:"matched_pose"`
+	ModelName    string  `json:"model_name"`
+	ModelVersion string  `json:"model_version"`
+}
+
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
@@ -134,6 +147,82 @@ func (c *Client) Embed(
 			QualityScore: payload.QualityScore,
 		},
 	}, nil
+}
+
+func (c *Client) Verify(
+	ctx context.Context,
+	image []byte,
+	filename string,
+	contentType string,
+	templates []ReferenceTemplate,
+) (VerifyResult, error) {
+	references := struct {
+		Templates []map[string]any `json:"templates"`
+	}{Templates: make([]map[string]any, 0, len(templates))}
+	for _, tmpl := range templates {
+		references.Templates = append(references.Templates, map[string]any{
+			"pose":               tmpl.Pose,
+			"embedding":          base64.StdEncoding.EncodeToString(tmpl.Embedding),
+			"embedding_encoding": "float32-le-base64",
+			"embedding_dim":      tmpl.EmbeddingDim,
+			"model_name":         tmpl.ModelName,
+			"model_version":      tmpl.ModelVersion,
+		})
+	}
+	referencesJSON, err := json.Marshal(references)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("image", filename)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	if _, err := part.Write(image); err != nil {
+		return VerifyResult{}, err
+	}
+	if err := writer.WriteField("references", string(referencesJSON)); err != nil {
+		return VerifyResult{}, err
+	}
+	if err := writer.Close(); err != nil {
+		return VerifyResult{}, err
+	}
+
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, c.baseURL+"/internal/v1/faces/verify", &body,
+	)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	if contentType != "" {
+		request.Header.Set("X-Image-Content-Type", contentType)
+	}
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return VerifyResult{}, ErrFaceServiceTimeout
+		}
+		return VerifyResult{}, fmt.Errorf("%w: %v", ErrFaceServiceUnavailable, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, response.Body)
+		return VerifyResult{}, fmt.Errorf("%w: status %d", ErrFaceServiceUnavailable, response.StatusCode)
+	}
+	var result VerifyResult
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
+		return VerifyResult{}, fmt.Errorf("%w: invalid response", ErrFaceServiceUnavailable)
+	}
+	if result.Matched && !result.MatchedPose.Valid() {
+		return VerifyResult{}, fmt.Errorf("%w: invalid matched pose", ErrFaceServiceUnavailable)
+	}
+	if math.IsNaN(float64(result.BestScore)) || math.IsInf(float64(result.BestScore), 0) {
+		return VerifyResult{}, fmt.Errorf("%w: invalid score", ErrFaceServiceUnavailable)
+	}
+	return result, nil
 }
 
 func validateEmbedding(embedding []byte) error {

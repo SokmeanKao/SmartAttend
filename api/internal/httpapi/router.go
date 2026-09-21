@@ -32,6 +32,16 @@ func NewRouter(cfg config.Config, employeeStores ...employeeStore) http.Handler 
 		enrollments: enrollmentStore,
 		faceClient:  face.NewClient(cfg.FaceServiceURL, 5*time.Second),
 	}
+	var verifyStore verifyCandidateStore = unavailableVerifyCandidateStore{}
+	if configured, ok := employeeStore.(verifyCandidateStore); ok {
+		verifyStore = configured
+	}
+	verifyAPI := verifyHandlers{
+		store:    verifyStore,
+		verifier: face.NewClient(cfg.FaceServiceURL, 5*time.Second),
+		receipts: face.NewReceiptStore(time.Minute, time.Now),
+		limiter:  newIPRateLimiter(20, time.Minute, time.Now),
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthHandler)
@@ -48,6 +58,7 @@ func NewRouter(cfg config.Config, employeeStores ...employeeStore) http.Handler 
 	mux.Handle("POST /api/v1/employees/{id}/face/enroll/{enrollment_id}/commit", requireSession(sessionStore, http.HandlerFunc(enrollAPI.commit)))
 	mux.Handle("POST /api/v1/employees/{id}/face/enroll/{enrollment_id}/abort", requireSession(sessionStore, http.HandlerFunc(enrollAPI.abort)))
 	mux.Handle("DELETE /api/v1/employees/{id}/face", requireSession(sessionStore, http.HandlerFunc(enrollAPI.deleteFace)))
+	mux.HandleFunc("POST /api/v1/face/verify", verifyAPI.verify)
 	return CORSMiddleware(cfg)(mux)
 }
 

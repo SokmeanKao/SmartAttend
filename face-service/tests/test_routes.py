@@ -34,6 +34,26 @@ class _Pipeline:
             raise self.error
         return _Result()
 
+    def verify(
+        self, image: bytes, references: list[dict[str, object]]
+    ) -> object:
+        self.calls.append((image, str(references)))
+        if self.error:
+            raise self.error
+        return _VerifyResult()
+
+
+@dataclass
+class _VerifyResult:
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "matched": True,
+            "best_score": 0.91,
+            "matched_pose": "FRONT",
+            "model_name": "sface",
+            "model_version": "2021dec",
+        }
+
 
 def test_embed_route_uses_pipeline_and_returns_contract():
     pipeline = _Pipeline()
@@ -71,6 +91,40 @@ def test_embed_route_returns_structured_face_error():
             "message": "no qualifying face was detected",
         }
     }
+
+
+def test_verify_route_accepts_references_json_and_never_returns_embeddings():
+    pipeline = _Pipeline()
+    app = create_app(pipeline=pipeline)
+    references = {
+        "templates": [
+            {
+                "pose": "FRONT",
+                "embedding": "AAAA",
+                "embedding_encoding": "float32-le-base64",
+                "embedding_dim": 128,
+                "model_name": "sface",
+                "model_version": "2021dec",
+            }
+        ]
+    }
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/internal/v1/faces/verify",
+            files={"image": ("face.png", b"image bytes", "image/png")},
+            data={"references": __import__("json").dumps(references)},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "matched": True,
+        "best_score": 0.91,
+        "matched_pose": "FRONT",
+        "model_name": "sface",
+        "model_version": "2021dec",
+    }
+    assert "embedding" not in response.text
 
 
 def test_startup_refuses_model_hash_mismatch(tmp_path: Path):
