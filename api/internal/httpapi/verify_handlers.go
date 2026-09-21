@@ -102,10 +102,13 @@ func (h verifyHandlers) verify(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		switch {
+		case writeFaceServiceError(w, err):
 		case errors.Is(err, face.ErrFaceServiceTimeout):
 			WriteError(w, http.StatusGatewayTimeout, "FACE_SERVICE_TIMEOUT", "Face service timed out")
-		default:
+		case errors.Is(err, face.ErrFaceServiceUnavailable):
 			WriteError(w, http.StatusServiceUnavailable, "FACE_SERVICE_UNAVAILABLE", "Face service unavailable")
+		default:
+			WriteError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
 		}
 		return
 	}

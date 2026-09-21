@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"net/http"
@@ -78,6 +79,49 @@ func TestClientEmbedRejectsMalformedEmbedding(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("Embed() error = nil, want malformed embedding error")
+	}
+}
+
+func TestClientEmbedPropagatesFaceServiceErrorEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]string{
+				"code":    "FACE_NOT_FOUND",
+				"message": "no qualifying face was detected",
+			},
+		})
+	}))
+	defer server.Close()
+
+	_, err := NewClient(server.URL, time.Second).Embed(
+		context.Background(), []byte("image"), "face.jpg", "image/jpeg", PoseFront,
+	)
+	var serviceErr *ServiceError
+	if !errors.As(err, &serviceErr) {
+		t.Fatalf("Embed() error = %v, want *ServiceError", err)
+	}
+	if serviceErr.Code != "FACE_NOT_FOUND" ||
+		serviceErr.Message != "no qualifying face was detected" ||
+		serviceErr.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("service error = %#v", serviceErr)
+	}
+	if errors.Is(err, ErrFaceServiceUnavailable) {
+		t.Fatal("error envelope was collapsed to ErrFaceServiceUnavailable")
+	}
+}
+
+func TestClientEmbedMapsBareServerErrorToUnavailable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "upstream failed", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	_, err := NewClient(server.URL, time.Second).Embed(
+		context.Background(), []byte("image"), "face.jpg", "image/jpeg", PoseFront,
+	)
+	if !errors.Is(err, ErrFaceServiceUnavailable) {
+		t.Fatalf("Embed() error = %v, want ErrFaceServiceUnavailable", err)
 	}
 }
 

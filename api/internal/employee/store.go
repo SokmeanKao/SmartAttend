@@ -394,6 +394,9 @@ func (s *Store) CommitEnrollment(
 	if err := enrollment.ValidateComplete(); err != nil {
 		return err
 	}
+	if err := enrollment.ValidateModelSet(); err != nil {
+		return err
+	}
 
 	rows, err := tx.Query(ctx, `
 		SELECT pose, id

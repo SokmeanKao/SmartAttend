@@ -220,6 +220,9 @@ func (h enrollHandlers) enrollmentForRequest(
 }
 
 func writeEnrollmentError(w http.ResponseWriter, err error) {
+	if writeFaceServiceError(w, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, employee.ErrNotFound):
 		writeEmployeeError(w, err)
@@ -233,6 +236,10 @@ func writeEnrollmentError(w http.ResponseWriter, err error) {
 		WriteError(w, http.StatusGone, "ENROLLMENT_EXPIRED", "Enrollment expired")
 	case errors.Is(err, face.ErrInvalidPose):
 		WriteError(w, http.StatusUnprocessableEntity, "INVALID_POSE", "Captured face does not match the expected pose")
+	case errors.Is(err, face.ErrModelVersionMismatch):
+		WriteError(w, http.StatusUnprocessableEntity, "MODEL_VERSION_MISMATCH", "Captured templates use incompatible face models")
+	case errors.Is(err, face.ErrValidation):
+		WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Captured templates are invalid")
 	case errors.Is(err, face.ErrFaceServiceTimeout):
 		WriteError(w, http.StatusGatewayTimeout, "FACE_SERVICE_TIMEOUT", "Face service timed out")
 	case errors.Is(err, face.ErrFaceServiceUnavailable):
@@ -240,6 +247,26 @@ func writeEnrollmentError(w http.ResponseWriter, err error) {
 	default:
 		WriteError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
 	}
+}
+
+func writeFaceServiceError(w http.ResponseWriter, err error) bool {
+	var serviceErr *face.ServiceError
+	if !errors.As(err, &serviceErr) {
+		return false
+	}
+	switch serviceErr.Code {
+	case "VALIDATION_ERROR":
+		WriteError(w, http.StatusBadRequest, serviceErr.Code, serviceErr.Message)
+	case "REQUEST_TOO_LARGE":
+		WriteError(w, http.StatusRequestEntityTooLarge, serviceErr.Code, serviceErr.Message)
+	case "FACE_NOT_FOUND", "MULTIPLE_FACES", "FACE_TOO_SMALL", "FACE_TOO_BLURRY",
+		"FACE_QUALITY_TOO_LOW", "INVALID_POSE", "MODEL_VERSION_MISMATCH",
+		"INVALID_REFERENCE_TEMPLATES":
+		WriteError(w, http.StatusUnprocessableEntity, serviceErr.Code, serviceErr.Message)
+	default:
+		return false
+	}
+	return true
 }
 
 type unavailableFaceTemplateStore struct{}

@@ -132,6 +132,38 @@ func TestPublicVerifyStoreFailureIsInternalError(t *testing.T) {
 	}
 }
 
+func TestPublicVerifyPropagatesFaceServiceError(t *testing.T) {
+	handler := newVerifyHandlerForTest(
+		verifyStoreStub{candidate: verificationCandidate{
+			Employee: employee.Employee{
+				ID: "employee-1", Status: employee.StatusActive,
+				EnrollmentStatus: employee.EnrollmentEnrolled,
+			},
+			Templates: []face.ReferenceTemplate{{Pose: face.PoseFront}},
+		}},
+		faceVerifierStub{err: &face.ServiceError{
+			Code: "FACE_NOT_FOUND", Message: "no qualifying face was detected",
+			StatusCode: http.StatusUnprocessableEntity,
+		}},
+		face.NewReceiptStore(time.Minute, time.Now),
+	)
+	response := httptest.NewRecorder()
+
+	handler.verify(response, verifyRequest(t, "EMP001"))
+
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body = %s", response.Code, response.Body.String())
+	}
+	var payload errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Error.Code != "FACE_NOT_FOUND" ||
+		payload.Error.Message != "no qualifying face was detected" {
+		t.Fatalf("error = %#v", payload.Error)
+	}
+}
+
 func TestPublicVerifyMatchIssuesReceiptWithServerMetadata(t *testing.T) {
 	receipts := face.NewReceiptStore(time.Minute, time.Now)
 	found := employee.Employee{

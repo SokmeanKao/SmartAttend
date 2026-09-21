@@ -21,6 +21,16 @@ var (
 	ErrFaceServiceTimeout     = errors.New("face service timeout")
 )
 
+type ServiceError struct {
+	Code       string
+	Message    string
+	StatusCode int
+}
+
+func (e *ServiceError) Error() string {
+	return e.Code + ": " + e.Message
+}
+
 type DetectedPose struct {
 	Label    Pose    `json:"label"`
 	YawScore float32 `json:"yaw_score"`
@@ -100,8 +110,7 @@ func (c *Client) Embed(
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, response.Body)
-		return EmbedResult{}, fmt.Errorf("%w: status %d", ErrFaceServiceUnavailable, response.StatusCode)
+		return EmbedResult{}, faceServiceResponseError(response)
 	}
 
 	var payload struct {
@@ -209,8 +218,7 @@ func (c *Client) Verify(
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, response.Body)
-		return VerifyResult{}, fmt.Errorf("%w: status %d", ErrFaceServiceUnavailable, response.StatusCode)
+		return VerifyResult{}, faceServiceResponseError(response)
 	}
 	var result VerifyResult
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
@@ -223,6 +231,28 @@ func (c *Client) Verify(
 		return VerifyResult{}, fmt.Errorf("%w: invalid score", ErrFaceServiceUnavailable)
 	}
 	return result, nil
+}
+
+func faceServiceResponseError(response *http.Response) error {
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err == nil &&
+		payload.Error.Code != "" &&
+		payload.Error.Message != "" {
+		return &ServiceError{
+			Code:       payload.Error.Code,
+			Message:    payload.Error.Message,
+			StatusCode: response.StatusCode,
+		}
+	}
+	if response.StatusCode >= http.StatusInternalServerError {
+		return fmt.Errorf("%w: status %d", ErrFaceServiceUnavailable, response.StatusCode)
+	}
+	return fmt.Errorf("face service returned status %d without an error envelope", response.StatusCode)
 }
 
 func validateEmbedding(embedding []byte) error {

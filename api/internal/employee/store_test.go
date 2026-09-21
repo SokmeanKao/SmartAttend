@@ -452,6 +452,26 @@ func TestIncompleteEnrollmentCannotCommit(t *testing.T) {
 	assertActiveTemplateSet(t, store, created.ID, 0)
 }
 
+func TestEnrollmentWithMixedStagedModelsCannotCommit(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	created := createTestEmployee(t, store, "MIXEDMODEL")
+	templates := stagedTemplates(1)
+	right := templates[face.PoseRight]
+	right.ModelVersion = "next-model"
+	templates[face.PoseRight] = right
+
+	err := store.CommitEnrollment(
+		ctx,
+		created.ID,
+		testEnrollmentLoader(created.ID, nil, templates),
+	)
+	if !errors.Is(err, face.ErrModelVersionMismatch) {
+		t.Fatalf("CommitEnrollment() error = %v, want ErrModelVersionMismatch", err)
+	}
+	assertActiveTemplateSet(t, store, created.ID, 0)
+}
+
 func waitForAdvisoryLock(t *testing.T, store *Store) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

@@ -80,6 +80,33 @@ func TestEnrollmentIncompleteUntilAllRequiredPosesCaptured(t *testing.T) {
 	}
 }
 
+func TestEnrollmentValidateModelSet(t *testing.T) {
+	templates := map[Pose]StagedTemplate{
+		PoseFront: stagedTemplate(0.9),
+		PoseLeft:  stagedTemplate(0.9),
+		PoseRight: stagedTemplate(0.9),
+	}
+	enrollment := &Enrollment{Templates: templates}
+	if err := enrollment.ValidateModelSet(); err != nil {
+		t.Fatalf("ValidateModelSet() error = %v", err)
+	}
+
+	right := templates[PoseRight]
+	right.ModelVersion = "different"
+	templates[PoseRight] = right
+	if err := enrollment.ValidateModelSet(); !errors.Is(err, ErrModelVersionMismatch) {
+		t.Fatalf("mixed model error = %v, want ErrModelVersionMismatch", err)
+	}
+
+	templates[PoseRight] = stagedTemplate(0.9)
+	right = templates[PoseRight]
+	right.EmbeddingDim++
+	templates[PoseRight] = right
+	if err := enrollment.ValidateModelSet(); !errors.Is(err, ErrValidation) {
+		t.Fatalf("mixed dimension error = %v, want ErrValidation", err)
+	}
+}
+
 func TestEnrollmentExpiresAfterTTL(t *testing.T) {
 	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
 	store := NewMemoryEnrollmentStore(10*time.Minute, func() time.Time { return now })

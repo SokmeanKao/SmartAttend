@@ -23,6 +23,8 @@ var (
 	ErrEnrollmentIncomplete = errors.New("enrollment incomplete")
 	ErrEnrollmentConflict   = errors.New("enrollment conflict")
 	ErrInvalidPose          = errors.New("invalid pose")
+	ErrModelVersionMismatch = errors.New("model version mismatch")
+	ErrValidation           = errors.New("validation error")
 )
 
 type StagedTemplate struct {
@@ -45,6 +47,23 @@ func (e *Enrollment) ValidateComplete() error {
 	for _, pose := range []Pose{PoseFront, PoseLeft, PoseRight} {
 		if _, ok := e.Templates[pose]; !ok {
 			return ErrEnrollmentIncomplete
+		}
+	}
+	return nil
+}
+
+func (e *Enrollment) ValidateModelSet() error {
+	front := e.Templates[PoseFront]
+	if front.ModelName == "" || front.ModelVersion == "" || front.EmbeddingDim <= 0 {
+		return ErrValidation
+	}
+	for _, pose := range []Pose{PoseLeft, PoseRight} {
+		tmpl := e.Templates[pose]
+		if tmpl.ModelName != front.ModelName || tmpl.ModelVersion != front.ModelVersion {
+			return ErrModelVersionMismatch
+		}
+		if tmpl.EmbeddingDim != front.EmbeddingDim {
+			return ErrValidation
 		}
 	}
 	return nil
