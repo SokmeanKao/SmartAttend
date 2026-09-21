@@ -182,6 +182,57 @@ func TestEnrollmentCommitRejectsInactiveEmployee(t *testing.T) {
 	assertActiveTemplateSet(t, store, created.ID, 0)
 }
 
+func TestEnrollmentCommitWaitsForConcurrentDeactivate(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	created := createTestEmployee(t, store, "DEACTIVATE_RACE")
+
+	blocker, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback(ctx)
+	var lockedID string
+	if err := blocker.QueryRow(ctx,
+		`SELECT id FROM employees WHERE id = $1 FOR UPDATE`,
+		created.ID,
+	).Scan(&lockedID); err != nil {
+		t.Fatal(err)
+	}
+
+	deactivateResult := make(chan error, 1)
+	go func() {
+		_, err := store.Deactivate(ctx, created.ID)
+		deactivateResult <- err
+	}()
+	waitForAdvisoryLock(t, store)
+
+	commitResult := make(chan error, 1)
+	go func() {
+		commitResult <- store.CommitEnrollment(ctx, created.ID, nil, stagedTemplates(1))
+	}()
+
+	if err := blocker.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-deactivateResult; err != nil {
+		t.Fatalf("Deactivate() error = %v", err)
+	}
+	if err := <-commitResult; !errors.Is(err, ErrInactive) {
+		t.Fatalf("CommitEnrollment() error = %v, want ErrInactive", err)
+	}
+
+	found, err := store.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.Status != StatusInactive || found.EnrollmentStatus != EnrollmentNotEnrolled {
+		t.Fatalf("employee states = %s/%s, want INACTIVE/NOT_ENROLLED",
+			found.Status, found.EnrollmentStatus)
+	}
+	assertActiveTemplateSet(t, store, created.ID, 0)
+}
+
 func TestIncompleteEnrollmentCannotCommit(t *testing.T) {
 	store := newIntegrationStore(t)
 	ctx := context.Background()
@@ -194,6 +245,26 @@ func TestIncompleteEnrollmentCannotCommit(t *testing.T) {
 		t.Fatalf("CommitEnrollment() error = %v, want ErrEnrollmentIncomplete", err)
 	}
 	assertActiveTemplateSet(t, store, created.ID, 0)
+}
+
+func waitForAdvisoryLock(t *testing.T, store *Store) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int
+		if err := store.pool.QueryRow(context.Background(), `
+			SELECT count(*)
+			FROM pg_locks
+			WHERE locktype = 'advisory' AND granted
+		`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for employee advisory lock")
 }
 
 func newIntegrationStore(t *testing.T) *Store {

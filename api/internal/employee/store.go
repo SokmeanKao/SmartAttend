@@ -126,11 +126,43 @@ func (s *Store) Get(ctx context.Context, id string) (Employee, error) {
 }
 
 func (s *Store) Update(ctx context.Context, id string, params UpdateParams) (Employee, error) {
+	if params.Status == nil {
+		return s.update(ctx, s.pool, id, params)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Employee{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockEmployee(ctx, tx, id); err != nil {
+		return Employee{}, err
+	}
+	updated, err := s.update(ctx, tx, id, params)
+	if err != nil {
+		return Employee{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Employee{}, err
+	}
+	return updated, nil
+}
+
+type employeeQueryRower interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (s *Store) update(
+	ctx context.Context,
+	db employeeQueryRower,
+	id string,
+	params UpdateParams,
+) (Employee, error) {
 	emailSet, email := nullableUpdate(params.Email)
 	departmentSet, department := nullableUpdate(params.Department)
 	positionSet, position := nullableUpdate(params.Position)
 
-	row := s.pool.QueryRow(ctx, `
+	row := db.QueryRow(ctx, `
 		UPDATE employees
 		SET employee_code = CASE WHEN $2::boolean THEN $3::text ELSE employee_code END,
 			first_name = CASE WHEN $4::boolean THEN $5::text ELSE first_name END,
@@ -156,7 +188,15 @@ func (s *Store) Update(ctx context.Context, id string, params UpdateParams) (Emp
 }
 
 func (s *Store) Deactivate(ctx context.Context, id string) (Employee, error) {
-	row := s.pool.QueryRow(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Employee{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockEmployee(ctx, tx, id); err != nil {
+		return Employee{}, err
+	}
+	row := tx.QueryRow(ctx, `
 		UPDATE employees
 		SET status = 'INACTIVE', updated_at = now()
 		WHERE id = $1
@@ -164,7 +204,13 @@ func (s *Store) Deactivate(ctx context.Context, id string) (Employee, error) {
 		id,
 	)
 	employee, err := scanEmployee(row)
-	return employee, mapStoreError(err)
+	if err != nil {
+		return Employee{}, mapStoreError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Employee{}, err
+	}
+	return employee, nil
 }
 
 func (s *Store) ActiveTemplateIDs(ctx context.Context, employeeID string) (map[face.Pose]uuid.UUID, error) {
@@ -208,15 +254,15 @@ func (s *Store) CommitEnrollment(
 	}
 	defer tx.Rollback(ctx)
 
-	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`,
-		employeeID,
-	); err != nil {
+	if err := lockEmployee(ctx, tx, employeeID); err != nil {
 		return err
 	}
 
 	var status string
-	if err := tx.QueryRow(ctx, `SELECT status FROM employees WHERE id = $1`, employeeID).Scan(&status); err != nil {
+	if err := tx.QueryRow(ctx,
+		`SELECT status FROM employees WHERE id = $1 FOR UPDATE`,
+		employeeID,
+	).Scan(&status); err != nil {
 		return mapStoreError(err)
 	}
 	if status != StatusActive {
@@ -294,16 +340,21 @@ func sameTemplateIDs(left, right map[face.Pose]uuid.UUID) bool {
 	return true
 }
 
+func lockEmployee(ctx context.Context, tx pgx.Tx, employeeID string) error {
+	_, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`,
+		employeeID,
+	)
+	return err
+}
+
 func (s *Store) DeleteFace(ctx context.Context, employeeID string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`,
-		employeeID,
-	); err != nil {
+	if err := lockEmployee(ctx, tx, employeeID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
