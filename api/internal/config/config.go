@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+const maxSessionTTL = 8 * time.Hour
+
 type Config struct {
 	WebOrigin         string
 	DatabaseURL       string
@@ -49,11 +51,14 @@ func Load() (Config, error) {
 
 	cookieSecure := os.Getenv("COOKIE_SECURE") == "true"
 
-	sessionTTL := 8 * time.Hour
+	sessionTTL := maxSessionTTL
 	if raw := os.Getenv("SESSION_TTL"); raw != "" {
 		parsed, err := time.ParseDuration(raw)
 		if err != nil {
 			return Config{}, fmt.Errorf("SESSION_TTL: %w", err)
+		}
+		if parsed > maxSessionTTL {
+			return Config{}, fmt.Errorf("SESSION_TTL must not exceed 8h")
 		}
 		sessionTTL = parsed
 	}

@@ -2,17 +2,19 @@ package httpapi
 
 import (
 	"net/http"
-	"slices"
 
 	"github.com/smartattend/api/internal/config"
 )
 
 const allowedMethods = "GET, POST, PATCH, DELETE, OPTIONS"
 
-var unsafeMethods = []string{
-	http.MethodPost,
-	http.MethodPatch,
-	http.MethodDelete,
+func isSafeMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
 }
 
 func CORSMiddleware(cfg config.Config) func(http.Handler) http.Handler {
@@ -20,11 +22,12 @@ func CORSMiddleware(cfg config.Config) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
 
+			if !isSafeMethod(r.Method) && origin != cfg.WebOrigin {
+				WriteError(w, http.StatusForbidden, "ORIGIN_NOT_ALLOWED", "Origin not allowed")
+				return
+			}
+
 			if origin == "" {
-				if slices.Contains(unsafeMethods, r.Method) {
-					WriteError(w, http.StatusForbidden, "ORIGIN_NOT_ALLOWED", "Origin not allowed")
-					return
-				}
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -46,11 +49,6 @@ func CORSMiddleware(cfg config.Config) func(http.Handler) http.Handler {
 			}
 
 			if r.Method == http.MethodOptions {
-				WriteError(w, http.StatusForbidden, "ORIGIN_NOT_ALLOWED", "Origin not allowed")
-				return
-			}
-
-			if slices.Contains(unsafeMethods, r.Method) {
 				WriteError(w, http.StatusForbidden, "ORIGIN_NOT_ALLOWED", "Origin not allowed")
 				return
 			}

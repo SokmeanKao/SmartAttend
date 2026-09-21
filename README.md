@@ -40,10 +40,11 @@ docker compose exec face-service python -c "import urllib.request; print(urllib.
 
 ## Admin password hash
 
-The example hash in `.env.example` corresponds to password `changeme` (escape `$` as `$$` in `.env` for Compose). Regenerate with (added in a later milestone):
+The example hash in `.env.example` corresponds to password `changeme` (escape `$` as `$$` in `.env` for Compose). Regenerate by running the helper and entering the password on standard input:
 
 ```bash
-go run ./cmd/hashpwd 'your-password'
+cd api
+go run ./cmd/hashpwd
 ```
 
 ## Database

@@ -44,3 +44,45 @@ func TestCORSRejectsOtherOrigin(t *testing.T) {
 		t.Errorf("Access-Control-Allow-Credentials should not be true for foreign origin")
 	}
 }
+
+func TestCORSRequiresConfiguredOriginForEveryUnsafeMethod(t *testing.T) {
+	cfg := config.Config{WebOrigin: "http://localhost:3000"}
+	handler := NewRouter(cfg)
+
+	for _, method := range []string{http.MethodPut, http.MethodConnect, "PROPFIND"} {
+		for name, origin := range map[string]string{
+			"missing": "",
+			"foreign": "http://evil.example",
+		} {
+			t.Run(method+"/"+name, func(t *testing.T) {
+				req := httptest.NewRequest(method, "/healthz", nil)
+				req.Header.Set("Origin", origin)
+				rec := httptest.NewRecorder()
+
+				handler.ServeHTTP(rec, req)
+
+				if rec.Code != http.StatusForbidden {
+					t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+				}
+			})
+		}
+	}
+}
+
+func TestCORSSafeMethodsDoNotRequireOrigin(t *testing.T) {
+	cfg := config.Config{WebOrigin: "http://localhost:3000"}
+	handler := NewRouter(cfg)
+
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodOptions} {
+		t.Run(method, func(t *testing.T) {
+			req := httptest.NewRequest(method, "/healthz", nil)
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code == http.StatusForbidden {
+				t.Fatalf("status = %d, safe method must not require Origin", rec.Code)
+			}
+		})
+	}
+}
