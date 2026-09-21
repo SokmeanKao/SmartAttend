@@ -97,7 +97,7 @@ export default function EmployeesPage() {
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
-        <Button variant="outline" aria-label="Search" disabled={loading}>
+        <Button type="submit" variant="outline" aria-label="Search" disabled={loading}>
           <Search />
         </Button>
       </form>

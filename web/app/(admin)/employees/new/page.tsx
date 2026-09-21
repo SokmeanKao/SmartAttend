@@ -71,7 +71,7 @@ export default function NewEmployeePage() {
               >
                 Cancel
               </Link>
-              <Button disabled={submitting}>
+              <Button type="submit" disabled={submitting}>
                 {submitting ? "Creating…" : "Create employee"}
               </Button>
             </div>

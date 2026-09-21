@@ -104,7 +104,7 @@ export default function LoginPage() {
                   {error}
                 </p>
               )}
-              <Button className="h-10 w-full" disabled={submitting}>
+              <Button type="submit" className="h-10 w-full" disabled={submitting}>
                 {submitting ? "Signing in…" : "Sign in"}
               </Button>
             </form>

@@ -233,7 +233,7 @@ export default function EmployeeDetailPage({
               </p>
             )}
             <div className="mt-7 flex justify-end border-t pt-5">
-              <Button disabled={saving}>
+              <Button type="submit" disabled={saving}>
                 {saving ? "Saving…" : "Save changes"}
               </Button>
             </div>

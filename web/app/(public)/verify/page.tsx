@@ -261,7 +261,7 @@ export default function VerifyPage() {
                         {error}
                       </p>
                     )}
-                    <Button className="h-11 w-full" size="lg">
+                    <Button type="submit" className="h-11 w-full" size="lg">
                       Continue
                     </Button>
                   </form>
