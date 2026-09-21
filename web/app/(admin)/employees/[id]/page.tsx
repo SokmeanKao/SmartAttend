@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { FormEvent, use, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, ScanFace } from "lucide-react";
 
 import {
   EmployeeFields,
@@ -21,7 +21,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ApiError, apiFetch, type Employee } from "@/lib/api";
 
@@ -170,32 +170,43 @@ export default function EmployeeDetailPage({
           </p>
         </div>
         {employee.status === "ACTIVE" ? (
-          <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-            <AlertDialogTrigger className="inline-flex h-8 items-center justify-center rounded-lg bg-destructive/10 px-3 text-sm font-medium text-destructive hover:bg-destructive/20">
-              Deactivate
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Deactivate this employee?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  They will no longer be eligible for attendance or face
-                  enrollment. Their existing face templates will be retained.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel disabled={statusChanging}>
-                  Cancel
-                </AlertDialogCancel>
-                <AlertDialogAction
-                  variant="destructive"
-                  disabled={statusChanging}
-                  onClick={() => void changeStatus("INACTIVE")}
-                >
-                  {statusChanging ? "Deactivating…" : "Deactivate"}
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+          <div className="flex flex-wrap gap-2">
+            <Link
+              href={`/employees/${id}/face`}
+              className={buttonVariants({ variant: "default" })}
+            >
+              <ScanFace />
+              {employee.enrollment_status === "ENROLLED"
+                ? "Re-enroll face"
+                : "Enroll face"}
+            </Link>
+            <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+              <AlertDialogTrigger className="inline-flex h-8 items-center justify-center rounded-lg bg-destructive/10 px-3 text-sm font-medium text-destructive hover:bg-destructive/20">
+                Deactivate
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Deactivate this employee?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    They will no longer be eligible for attendance or face
+                    enrollment. Their existing face templates will be retained.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel disabled={statusChanging}>
+                    Cancel
+                  </AlertDialogCancel>
+                  <AlertDialogAction
+                    variant="destructive"
+                    disabled={statusChanging}
+                    onClick={() => void changeStatus("INACTIVE")}
+                  >
+                    {statusChanging ? "Deactivating…" : "Deactivate"}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          </div>
         ) : (
           <Button
             variant="outline"
