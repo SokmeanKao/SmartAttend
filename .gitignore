@@ -1,0 +1,17 @@
+.superpowers/
+.env
+node_modules/
+web/.next/
+web/node_modules/
+api/bin/
+face-service/models/*.onnx
+face-service/__pycache__/
+face-service/**/__pycache__/
+*.pyc
+.venv/
+dist/
+*.exe
+.DS_Store
+Thumbs.db
+*.log
+coverage/
