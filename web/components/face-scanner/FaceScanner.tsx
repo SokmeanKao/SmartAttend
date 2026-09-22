@@ -26,9 +26,12 @@ import {
   createGuidanceLoop,
   type GuidanceLoop,
 } from "./guidance/runGuidanceLoop";
-import { GuidanceBanner } from "./overlay/GuidanceBanner";
 import { OvalOverlay } from "./overlay/OvalOverlay";
 import { guidanceMessage } from "./overlay/guidanceCopy";
+import {
+  resolveFrameState,
+  type ScannerFrameOutcome,
+} from "./overlay/frameState";
 import type {
   CaptureCandidate,
   CaptureResult,
@@ -50,6 +53,8 @@ export type FaceScannerProps = {
   requiredPose: EnrollmentPose;
   active?: boolean;
   autoStart?: boolean;
+  /** Backend result — green/red only when set. Never from MediaPipe alone. */
+  frameOutcome?: ScannerFrameOutcome | null;
   onCapture: (candidate: CaptureCandidate) => Promise<CaptureResult>;
   instructionSlot?: ReactNode;
   progressSlot?: ReactNode;
@@ -58,7 +63,8 @@ export type FaceScannerProps = {
 export function FaceScanner({
   requiredPose,
   active = true,
-  autoStart = false,
+  autoStart: _autoStart = false,
+  frameOutcome = null,
   onCapture,
   instructionSlot,
   progressSlot,
@@ -78,7 +84,6 @@ export function FaceScanner({
   const [localError, setLocalError] = useState("");
   const [guidance, setGuidance] = useState<FaceGuidance>(IDLE_GUIDANCE);
   const [guidanceDegraded, setGuidanceDegraded] = useState(false);
-  const autoStartAttemptedRef = useRef(false);
 
   requiredPoseRef.current = requiredPose;
   activeRef.current = active;
@@ -90,9 +95,12 @@ export function FaceScanner({
     activeLabel,
     error: cameraError,
     requesting,
+    waitSeconds,
+    embedded,
     startCamera,
     stopCamera,
     switchCamera,
+    formatCameraLabel,
   } = useCameraStream(videoRef);
 
   const refreshState = useCallback(() => {
@@ -116,11 +124,8 @@ export function FaceScanner({
     setGuidance((g) => ({ ...g, stable: false }));
   }, [requiredPose]);
 
-  useEffect(() => {
-    if (!autoStart || autoStartAttemptedRef.current) return;
-    autoStartAttemptedRef.current = true;
-    void startCamera();
-  }, [autoStart, startCamera]);
+  // autoStart is intentionally a no-op: getUserMedia must run from a click
+  // (user gesture) or Chrome/Edge leave the permission promise pending forever.
 
   const runCapture = useCallback(
     async (source: "AUTO" | "MANUAL", guidanceSnapshot: FaceGuidance) => {
@@ -268,16 +273,21 @@ export function FaceScanner({
     active && cameraLive && captureState === "IDLE" && !busy && !requesting;
 
   const displayError = localError || cameraError;
-  const aligned =
-    guidance.faceDetected &&
-    guidance.centered &&
-    guidance.distance === "GOOD";
-  const banner =
+  const hint =
     cameraLive && active
       ? guidanceMessage(guidance, requiredPose)
       : cameraLive
         ? "Camera paused"
         : "";
+  const frameState = resolveFrameState({
+    cameraLive,
+    active,
+    guidance,
+    requiredPose,
+    captureState,
+    submitting: busy,
+    outcome: frameOutcome,
+  });
 
   return (
     <div>
@@ -291,19 +301,33 @@ export function FaceScanner({
             cameraLive ? "opacity-100" : "pointer-events-none opacity-0"
           }`}
         />
-        {cameraLive && <OvalOverlay aligned={aligned} />}
+        {cameraLive && (
+          <OvalOverlay frameState={frameState} detailHint={hint} />
+        )}
         {!cameraLive && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-zinc-300">
             <CameraOff className="size-10" />
             <p className="max-w-xs text-center text-sm">
-              Start the camera when you are ready.
+              Click{" "}
+              <span className="font-medium text-zinc-100">Start camera</span>{" "}
+              below and allow access when the browser asks.
             </p>
           </div>
         )}
-        {banner && <GuidanceBanner message={banner} />}
         {instructionSlot}
         {progressSlot}
       </div>
+
+      {embedded && (
+        <p role="status" className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          This looks like an embedded preview. Camera access often hangs here —
+          open{" "}
+          <a className="underline" href="http://localhost:3000" target="_blank" rel="noreferrer">
+            http://localhost:3000
+          </a>{" "}
+          in Chrome or Edge instead.
+        </p>
+      )}
 
       {guidanceDegraded && cameraLive && (
         <p className="mt-2 text-xs text-amber-700">
@@ -329,7 +353,7 @@ export function FaceScanner({
           >
             {cameras.map((camera) => (
               <option key={camera.deviceId} value={camera.deviceId}>
-                {camera.label}
+                {formatCameraLabel(camera)}
               </option>
             ))}
           </select>
@@ -344,14 +368,23 @@ export function FaceScanner({
 
       <div className="mt-4 flex flex-wrap gap-2">
         {!cameraLive ? (
-          <Button
-            type="button"
-            disabled={requesting}
-            onClick={() => void startCamera(selectedDeviceId || undefined)}
-          >
-            {requesting ? <RefreshCw className="animate-spin" /> : <Camera />}
-            {requesting ? "Requesting permission…" : "Start camera"}
-          </Button>
+          <>
+            <Button
+              type="button"
+              disabled={requesting}
+              onClick={() => void startCamera(selectedDeviceId || undefined)}
+            >
+              {requesting ? <RefreshCw className="animate-spin" /> : <Camera />}
+              {requesting
+                ? `Waiting for camera… ${waitSeconds}s`
+                : "Start camera"}
+            </Button>
+            {requesting && (
+              <Button type="button" variant="outline" onClick={stopCamera}>
+                Cancel
+              </Button>
+            )}
+          </>
         ) : (
           <>
             <Button

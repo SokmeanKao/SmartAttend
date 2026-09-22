@@ -6,6 +6,23 @@ const apiProxyTarget =
   process.env.API_PROXY_TARGET?.trim() || "http://localhost:8080";
 
 const nextConfig: NextConfig = {
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [
+          {
+            key: "Permissions-Policy",
+            value: "camera=(self), microphone=()",
+          },
+          {
+            key: "Cache-Control",
+            value: "no-store",
+          },
+        ],
+      },
+    ];
+  },
   async rewrites() {
     return [
       {

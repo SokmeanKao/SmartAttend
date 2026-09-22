@@ -16,6 +16,7 @@ import type {
   CaptureCandidate,
   CaptureResult,
 } from "@/components/face-scanner/types";
+import type { ScannerFrameOutcome } from "@/components/face-scanner/overlay/frameState";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -98,6 +99,9 @@ export default function VerifyPage() {
   const [recordedAction, setRecordedAction] =
     useState<AttendanceAction | null>(null);
   const [scannerActive, setScannerActive] = useState(true);
+  const [frameOutcome, setFrameOutcome] = useState<ScannerFrameOutcome | null>(
+    null,
+  );
 
   useEffect(() => {
     if (!verified || stage !== "verified") return;
@@ -106,6 +110,7 @@ export default function VerifyPage() {
       setVerified(null);
       setStage("employee_code");
       setAttendanceMessage("");
+      setFrameOutcome(null);
       setError("Your verification expired. Please verify your face again.");
     }, verified.expires_in_seconds * 1000);
 
@@ -122,6 +127,7 @@ export default function VerifyPage() {
 
     setEmployeeCode(normalizedCode);
     setError("");
+    setFrameOutcome(null);
     setScannerActive(true);
     setStage("camera");
   }
@@ -130,6 +136,7 @@ export default function VerifyPage() {
     candidate: CaptureCandidate,
   ): Promise<CaptureResult> {
     setError("");
+    setFrameOutcome(null);
     setStage("verifying");
 
     const form = new FormData();
@@ -148,17 +155,22 @@ export default function VerifyPage() {
 
       if (!result.matched) {
         setVerified(null);
+        setFrameOutcome("NO_MATCH");
         setStage("no_match");
         return { status: "ACCEPTED" };
       }
 
       setVerified(result);
       setAttendanceMessage("");
+      setFrameOutcome("MATCHED");
+      // Brief green border on the oval before switching to the action card.
+      await new Promise((resolve) => window.setTimeout(resolve, 900));
       setStage("verified");
       return { status: "ACCEPTED" };
     } catch (requestError) {
       const message = verificationErrorMessage(requestError);
       setError(message);
+      setFrameOutcome("ERROR");
       setStage("camera");
       setScannerActive(true);
       return { status: "REJECTED" };
@@ -171,8 +183,16 @@ export default function VerifyPage() {
     setAttendanceMessage("");
     setAttendanceAction(null);
     setRecordedAction(null);
+    setFrameOutcome(null);
     setScannerActive(true);
     setStage("employee_code");
+  }
+
+  function retryFaceVerification() {
+    setFrameOutcome(null);
+    setError("");
+    setScannerActive(true);
+    setStage("camera");
   }
 
   async function recordAttendance(action: AttendanceAction) {
@@ -293,7 +313,9 @@ export default function VerifyPage() {
               </Card>
             )}
 
-            {stage === "camera" && (
+            {(stage === "camera" ||
+              stage === "verifying" ||
+              stage === "no_match") && (
               <Card className="border-0 bg-white/95 shadow-xl shadow-emerald-950/5 ring-1 ring-emerald-950/10">
                 <CardHeader>
                   <button
@@ -313,11 +335,39 @@ export default function VerifyPage() {
                 <CardContent>
                   <FaceScanner
                     requiredPose="FRONT"
-                    active={scannerActive}
-                    autoStart
+                    active={scannerActive && stage === "camera"}
+                    frameOutcome={
+                      stage === "no_match" ? "NO_MATCH" : frameOutcome
+                    }
                     onCapture={verifyFace}
                   />
-                  {error && (
+                  {stage === "verifying" && (
+                    <p
+                      aria-live="polite"
+                      className="mt-4 text-center text-sm text-muted-foreground"
+                    >
+                      Verifying with the server — please wait.
+                    </p>
+                  )}
+                  {stage === "no_match" && (
+                    <div className="mt-4 space-y-3">
+                      <p
+                        role="alert"
+                        className="rounded-lg bg-red-50 px-3 py-2 text-center text-sm text-destructive"
+                      >
+                        Face not matched. Check lighting and try again.
+                      </p>
+                      <div className="flex flex-col justify-center gap-3 sm:flex-row">
+                        <Button onClick={retryFaceVerification}>
+                          Try face verification again
+                        </Button>
+                        <Button variant="outline" onClick={resetVerification}>
+                          Use a different code
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                  {error && stage === "camera" && (
                     <p
                       role="alert"
                       className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-destructive"
@@ -325,53 +375,20 @@ export default function VerifyPage() {
                       {error}
                     </p>
                   )}
-                </CardContent>
-              </Card>
-            )}
-
-            {stage === "verifying" && (
-              <Card
-                aria-live="polite"
-                className="border-0 bg-white/95 py-12 text-center shadow-xl shadow-emerald-950/5 ring-1 ring-emerald-950/10"
-              >
-                <CardContent>
-                  <RefreshCw className="mx-auto size-10 animate-spin text-emerald-700" />
-                  <h1 className="mt-5 text-2xl font-semibold">
-                    Verifying your face…
-                  </h1>
-                  <p className="mt-2 text-muted-foreground">
-                    Please wait. This should only take a moment.
-                  </p>
-                </CardContent>
-              </Card>
-            )}
-
-            {stage === "no_match" && (
-              <Card className="border-0 bg-white/95 py-8 text-center shadow-xl shadow-emerald-950/5 ring-1 ring-emerald-950/10">
-                <CardContent>
-                  <div className="mx-auto flex size-14 items-center justify-center rounded-full bg-amber-100 text-amber-700">
-                    <Fingerprint className="size-7" />
-                  </div>
-                  <h1 className="mt-5 text-2xl font-semibold">
-                    Face not matched
-                  </h1>
-                  <p className="mx-auto mt-2 max-w-md text-muted-foreground">
-                    We could not confirm your identity. Check the lighting,
-                    remove face coverings, and try again.
-                  </p>
-                  <div className="mt-6 flex flex-col justify-center gap-3 sm:flex-row">
-                    <Button
-                      onClick={() => {
-                        setScannerActive(true);
-                        setStage("camera");
-                      }}
-                    >
-                      Try face verification again
-                    </Button>
-                    <Button variant="outline" onClick={resetVerification}>
-                      Use a different code
-                    </Button>
-                  </div>
+                  {frameOutcome === "ERROR" && stage === "camera" && (
+                    <div className="mt-3 flex justify-center">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => {
+                          setFrameOutcome(null);
+                          setError("");
+                        }}
+                      >
+                        Dismiss and retry
+                      </Button>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             )}

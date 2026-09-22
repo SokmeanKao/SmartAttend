@@ -118,7 +118,6 @@ export function EnrollmentFlow({
           <FaceScanner
             requiredPose={requiredPose as ScannerPose}
             active={!disabled && !committing}
-            autoStart
             onCapture={handleCapture}
           />
           {error && (
