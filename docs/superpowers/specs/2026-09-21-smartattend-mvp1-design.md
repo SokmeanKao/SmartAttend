@@ -473,11 +473,11 @@ No Late / Absent / Present HR semantics.
 
 ### Enrollment UX
 
-FRONT → LEFT → RIGHT guided captures; retake replaces staged pose; final CTA **Complete enrollment** performs commit. Camera states: idle / requesting_permission / live / capturing / submitting / error. Stop media tracks on release.
+Oval guided face scanner with MediaPipe advisory guidance; auto-captures FRONT → LEFT → RIGHT when stable; manual Capture fallback. Retake replaces staged pose; final CTA **Complete enrollment** performs commit. Server YuNet/SFace remain authoritative. See `2026-09-22-guided-face-scanner-design.md`.
 
 ### Verify UX
 
-Employee code → camera → verifying → match (Check In / Check Out) or no-match retry. `DUPLICATE_ATTENDANCE` keeps verified card while receipt valid. `VERIFICATION_TOKEN_INVALID` clears verified state.
+Employee code → oval scanner (front-like) → verifying → match (Check In / Check Out) or settled no-match with Try Again (scanner deactivated so auto-capture does not loop). `DUPLICATE_ATTENDANCE` keeps verified card while receipt valid. `VERIFICATION_TOKEN_INVALID` clears verified state.
 
 ### Debug UI
 
@@ -485,19 +485,29 @@ Employee code → camera → verifying → match (Check In / Check Out) or no-ma
 
 ### Camera capture
 
-User-triggered snapshot → limit dimensions → JPEG encode → verify blob ≤ 5 MiB → upload. No continuous upload.
+AUTO or MANUAL `CaptureCandidate` → limit dimensions → JPEG encode → verify blob ≤ 5 MiB → upload. Continuous MediaPipe guidance stays in-browser; no continuous image upload. Device picker may default `facingMode: "user"`; no security claim from physical vs virtual camera labels.
 
 ### UI requirements
 
 | ID | Requirement |
 | -- | ----------- |
 | **UI-01** | Seven MVP routes. Public: `/login`, `/verify`. Remaining routes use shadcn/ui + Maven Pro admin shell. |
-| **UI-02** | Enrollment uses FRONT → LEFT → RIGHT guided captures; re-capture replaces that staged pose; completion commits. |
+| **UI-02** | Enrollment uses an oval face-scanner that automatically captures accepted FRONT, LEFT, and RIGHT poses as the user follows directional guidance. Manual Capture remains available when automatic guidance cannot complete reliably. Both paths produce exactly three staged templates and use the existing enrollment commit flow. |
 | **UI-03** | Successful verification creates a receipt and exposes Check In / Check Out without another face capture. |
 | **UI-04** | Normal UI does not display biometric scores. Debug presentation is development-only and is not a security boundary. Embeddings never enter browser payloads. |
-| **UI-05** | MVP camera capture is user-triggered. No continuous image upload. |
+| **UI-05** | Only explicit AUTO or MANUAL capture candidates are uploaded. Continuous guidance processing stays in the browser. |
 | **UI-06** | Enrollment cleanup on navigation is best-effort; server 10-minute staging TTL is authoritative. |
 | **UI-07** | Dashboard statistics describe only MVP-supported facts: active employees, checked-in-today, today's event count. |
+| **UI-08** | Shared `FaceScanner` for enrollment and verification. Enrollment collects FRONT/LEFT/RIGHT; verification captures one stable front-like face. Mode-specific business workflow (including deactivating the scanner after verify settle) remains outside the scanner. |
+
+### Client guidance requirements
+
+| ID | Requirement |
+| -- | ----------- |
+| **FACE-GUIDE-02** | MediaPipe guidance is advisory and may only determine when SmartAttend should attempt a capture. Client-side guidance never marks enrollment or verification successful. Acceptance remains exclusively determined by the server-side YuNet/SFace pipeline. |
+| **FACE-GUIDE-03** | Continuous guidance processing remains local to the browser. Guidance frames are never continuously uploaded. |
+| **FACE-GUIDE-04** | Stability requires continuous readiness for the configured window; any readiness failure, required-pose change, capture attempt, or guidance-loop suspension resets stability. |
+| **FACE-GUIDE-05** | Client MediaPipe assets are exact-version / checksum-pinned and same-origin. Guidance cadence is adaptive; 10–15 FPS is a target, not a universal acceptance gate. |
 
 ---
 
@@ -528,7 +538,7 @@ OpenCV Zoo code is Apache-2.0 / MIT per directory, but pretrained weight licensi
 2. Creates EMP001 Sokmean  
 3. Opens face enrollment  
 4. Webcam starts  
-5. Captures FRONT / LEFT / RIGHT; all pass quality/pose validation  
+5. Guided oval enrollment captures FRONT / LEFT / RIGHT (auto and/or manual); all pass server quality/pose validation  
 6. Commit succeeds → ENROLLED  
 7. Opens public `/verify`  
 8. Enters EMP001  
@@ -613,7 +623,8 @@ smartattend/
 | VERIFY-RECEIPT-01, VERIFY-RECEIPT-02 | 4 |
 | ATTENDANCE-01 | 4 |
 | FACE-BIO-01 … FACE-BIO-06 | 5 |
-| UI-01 … UI-07 | 6 |
+| FACE-GUIDE-02 … FACE-GUIDE-05 | 6 (see also `2026-09-22-guided-face-scanner-design.md`) |
+| UI-01 … UI-08 | 6 |
 
 ---
 
