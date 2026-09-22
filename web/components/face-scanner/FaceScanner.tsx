@@ -1,7 +1,13 @@
 "use client";
 
 import { Camera, CameraOff, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { Button } from "@/components/ui/button";
 
@@ -11,11 +17,22 @@ import {
   createCaptureCoordinator,
   type ScannerCaptureState,
 } from "./captureCoordinator";
+import { mapLandmarksToGuidance } from "./guidance/mapLandmarksToGuidance";
+import {
+  createFaceLandmarker,
+  type LandmarkerHandle,
+} from "./guidance/mediapipeLandmarker";
+import {
+  createGuidanceLoop,
+  type GuidanceLoop,
+} from "./guidance/runGuidanceLoop";
 import type {
   CaptureCandidate,
   CaptureResult,
   EnrollmentPose,
   FaceGuidance,
+  GuidancePose,
+  NormalizedLandmark,
 } from "./types";
 
 const IDLE_GUIDANCE: FaceGuidance = {
@@ -28,16 +45,11 @@ const IDLE_GUIDANCE: FaceGuidance = {
 
 export type FaceScannerProps = {
   requiredPose: EnrollmentPose;
-  /** When false, pause auto-capture attempts (verify settle). Default true. */
   active?: boolean;
   autoStart?: boolean;
   onCapture: (candidate: CaptureCandidate) => Promise<CaptureResult>;
   instructionSlot?: ReactNode;
   progressSlot?: ReactNode;
-  /** Latest advisory guidance (Task 4 wires MediaPipe). */
-  guidance?: FaceGuidance;
-  /** Optional hook for Task 4 auto path. */
-  onTryAutoCapture?: (fn: (g: FaceGuidance) => void) => void;
 };
 
 export function FaceScanner({
@@ -47,16 +59,26 @@ export function FaceScanner({
   onCapture,
   instructionSlot,
   progressSlot,
-  guidance = IDLE_GUIDANCE,
-  onTryAutoCapture,
 }: FaceScannerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const coordinatorRef = useRef(createCaptureCoordinator({ cooldownMs: 400 }));
+  const landmarkerRef = useRef<LandmarkerHandle | null>(null);
+  const loopRef = useRef<GuidanceLoop | null>(null);
+  const prevPoseRef = useRef<GuidancePose>("UNKNOWN");
+  const stableSinceRef = useRef<number | null>(null);
+  const requiredPoseRef = useRef(requiredPose);
+  const activeRef = useRef(active);
+
   const [captureState, setCaptureState] =
     useState<ScannerCaptureState>("IDLE");
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState("");
+  const [guidance, setGuidance] = useState<FaceGuidance>(IDLE_GUIDANCE);
+  const [guidanceDegraded, setGuidanceDegraded] = useState(false);
   const autoStartAttemptedRef = useRef(false);
+
+  requiredPoseRef.current = requiredPose;
+  activeRef.current = active;
 
   const {
     cameraLive,
@@ -76,8 +98,20 @@ export function FaceScanner({
 
   useEffect(() => {
     const coordinator = coordinatorRef.current;
-    return () => coordinator.dispose();
+    return () => {
+      loopRef.current?.stop();
+      landmarkerRef.current?.close();
+      landmarkerRef.current = null;
+      coordinator.dispose();
+    };
   }, []);
+
+  // Reset stability when required pose changes (FACE-GUIDE-04).
+  useEffect(() => {
+    stableSinceRef.current = null;
+    prevPoseRef.current = "UNKNOWN";
+    setGuidance((g) => ({ ...g, stable: false }));
+  }, [requiredPose]);
 
   useEffect(() => {
     if (!autoStart || autoStartAttemptedRef.current) return;
@@ -87,13 +121,14 @@ export function FaceScanner({
 
   const runCapture = useCallback(
     async (source: "AUTO" | "MANUAL", guidanceSnapshot: FaceGuidance) => {
-      if (!active) return;
+      if (!activeRef.current) return;
       if (!cameraLive || !videoRef.current) return;
       if (!coordinatorRef.current.beginCapture()) return;
 
       refreshState();
       setBusy(true);
       setLocalError("");
+      stableSinceRef.current = null;
 
       try {
         const blob = await createJpegFromVideo(videoRef.current);
@@ -108,8 +143,6 @@ export function FaceScanner({
         const result = await onCapture(candidate);
         coordinatorRef.current.settle(result);
         refreshState();
-
-        // Cooldown → IDLE is async; poll briefly for UI.
         window.setTimeout(refreshState, 450);
       } catch (err) {
         coordinatorRef.current.settle({ status: "REJECTED" });
@@ -122,28 +155,111 @@ export function FaceScanner({
         setBusy(false);
       }
     },
-    [active, cameraLive, onCapture, refreshState],
+    [cameraLive, onCapture, refreshState],
   );
 
   const tryAutoCapture = useCallback(
     (g: FaceGuidance) => {
-      if (!active) return;
+      if (!activeRef.current) return;
       if (coordinatorRef.current.getState() !== "IDLE") return;
-      if (!g.stable || g.pose !== requiredPose) return;
+      if (!g.stable || g.pose !== requiredPoseRef.current) return;
       void runCapture("AUTO", g);
     },
-    [active, requiredPose, runCapture],
+    [runCapture],
   );
 
+  // Init / dispose MediaPipe with camera lifecycle.
   useEffect(() => {
-    onTryAutoCapture?.(tryAutoCapture);
-  }, [onTryAutoCapture, tryAutoCapture]);
+    if (!cameraLive) {
+      loopRef.current?.stop();
+      loopRef.current = null;
+      landmarkerRef.current?.close();
+      landmarkerRef.current = null;
+      setGuidance(IDLE_GUIDANCE);
+      return;
+    }
 
-  // Task 4 will drive MediaPipe; until then auto only if parent pushes stable guidance.
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const handle = await createFaceLandmarker();
+        if (cancelled) {
+          handle.close();
+          return;
+        }
+        landmarkerRef.current = handle;
+        setGuidanceDegraded(false);
+
+        const loop = createGuidanceLoop({
+          getVideo: () => videoRef.current,
+          isActive: () => activeRef.current && !document.hidden,
+          detect: (video, ts) => handle.detectForVideo(video, ts),
+          onGuidance: (result, video) => {
+            const faces =
+              (
+                result as {
+                  faceLandmarks?: NormalizedLandmark[][];
+                }
+              ).faceLandmarks ?? [];
+            const landmarks = faces[0];
+            const mapped = mapLandmarksToGuidance({
+              landmarks,
+              frameW: video.videoWidth,
+              frameH: video.videoHeight,
+              requiredPose: requiredPoseRef.current,
+              prevPose: prevPoseRef.current,
+              nowMs: performance.now(),
+              stableSince: stableSinceRef.current,
+            });
+            prevPoseRef.current = mapped.nextPrevPose;
+            stableSinceRef.current = mapped.nextStableSince;
+            setGuidance(mapped.guidance);
+            tryAutoCapture(mapped.guidance);
+          },
+          onError: () => {
+            setGuidanceDegraded(true);
+          },
+          targetIntervalMs: 80,
+        });
+        loopRef.current = loop;
+        if (activeRef.current) loop.start();
+      } catch {
+        if (!cancelled) {
+          setGuidanceDegraded(true);
+          landmarkerRef.current = null;
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      loopRef.current?.stop();
+      loopRef.current = null;
+      landmarkerRef.current?.close();
+      landmarkerRef.current = null;
+    };
+  }, [cameraLive, tryAutoCapture]);
+
+  // Pause / resume on active + visibility.
   useEffect(() => {
-    if (!active || !cameraLive) return;
-    tryAutoCapture(guidance);
-  }, [active, cameraLive, guidance, tryAutoCapture]);
+    const loop = loopRef.current;
+    if (!loop || !cameraLive) return;
+
+    function sync() {
+      if (!loopRef.current) return;
+      if (!active || document.hidden) {
+        loopRef.current.pause();
+        stableSinceRef.current = null;
+      } else {
+        loopRef.current.resume();
+      }
+    }
+
+    sync();
+    document.addEventListener("visibilitychange", sync);
+    return () => document.removeEventListener("visibilitychange", sync);
+  }, [active, cameraLive]);
 
   const manualEnabled =
     active && cameraLive && captureState === "IDLE" && !busy && !requesting;
@@ -174,8 +290,17 @@ export function FaceScanner({
         {progressSlot}
       </div>
 
+      {guidanceDegraded && cameraLive && (
+        <p className="mt-2 text-xs text-amber-700">
+          Face guidance is unavailable. Use Capture manually — server checks
+          still apply.
+        </p>
+      )}
+
       {cameraLive && activeLabel && (
-        <p className="mt-2 text-xs text-muted-foreground">Using: {activeLabel}</p>
+        <p className="mt-2 text-xs text-muted-foreground">
+          Using: {activeLabel}
+        </p>
       )}
 
       {cameras.length > 1 && (
