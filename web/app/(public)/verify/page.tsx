@@ -11,7 +11,11 @@ import {
 } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 
-import { CameraCapture } from "@/components/camera/CameraCapture";
+import { FaceScanner } from "@/components/face-scanner/FaceScanner";
+import type {
+  CaptureCandidate,
+  CaptureResult,
+} from "@/components/face-scanner/types";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -93,6 +97,7 @@ export default function VerifyPage() {
   const [attendanceMessage, setAttendanceMessage] = useState("");
   const [recordedAction, setRecordedAction] =
     useState<AttendanceAction | null>(null);
+  const [scannerActive, setScannerActive] = useState(true);
 
   useEffect(() => {
     if (!verified || stage !== "verified") return;
@@ -117,16 +122,20 @@ export default function VerifyPage() {
 
     setEmployeeCode(normalizedCode);
     setError("");
+    setScannerActive(true);
     setStage("camera");
   }
 
-  async function verifyFace(image: Blob) {
+  async function verifyFace(
+    candidate: CaptureCandidate,
+  ): Promise<CaptureResult> {
     setError("");
     setStage("verifying");
 
     const form = new FormData();
     form.append("employee_code", employeeCode);
-    form.append("image", image, "verification.jpg");
+    // guidance is advisory only — never sent as trusted pose metadata
+    form.append("image", candidate.blob, "verification.jpg");
 
     try {
       const result = await apiFetch<VerifyResponse>("/api/v1/face/verify", {
@@ -134,20 +143,25 @@ export default function VerifyPage() {
         body: form,
       });
 
+      // Settled outcomes deactivate scanner so no auto-recapture loop.
+      setScannerActive(false);
+
       if (!result.matched) {
         setVerified(null);
         setStage("no_match");
-        return;
+        return { status: "ACCEPTED" };
       }
 
       setVerified(result);
       setAttendanceMessage("");
       setStage("verified");
+      return { status: "ACCEPTED" };
     } catch (requestError) {
       const message = verificationErrorMessage(requestError);
       setError(message);
       setStage("camera");
-      throw new Error(message);
+      setScannerActive(true);
+      return { status: "REJECTED" };
     }
   }
 
@@ -157,6 +171,7 @@ export default function VerifyPage() {
     setAttendanceMessage("");
     setAttendanceAction(null);
     setRecordedAction(null);
+    setScannerActive(true);
     setStage("employee_code");
   }
 
@@ -296,10 +311,10 @@ export default function VerifyPage() {
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <CameraCapture
+                  <FaceScanner
+                    requiredPose="FRONT"
+                    active={scannerActive}
                     autoStart
-                    captureLabel="Capture and verify"
-                    instruction="Center your face, look forward, and hold still."
                     onCapture={verifyFace}
                   />
                   {error && (
@@ -345,7 +360,12 @@ export default function VerifyPage() {
                     remove face coverings, and try again.
                   </p>
                   <div className="mt-6 flex flex-col justify-center gap-3 sm:flex-row">
-                    <Button onClick={() => setStage("camera")}>
+                    <Button
+                      onClick={() => {
+                        setScannerActive(true);
+                        setStage("camera");
+                      }}
+                    >
                       Try face verification again
                     </Button>
                     <Button variant="outline" onClick={resetVerification}>

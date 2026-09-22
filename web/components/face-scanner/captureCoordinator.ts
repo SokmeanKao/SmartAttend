@@ -1,4 +1,4 @@
-import type { CaptureResult } from "../types";
+import type { CaptureResult } from "./types";
 
 export type ScannerCaptureState =
   | "IDLE"
