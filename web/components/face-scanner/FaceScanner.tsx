@@ -26,6 +26,9 @@ import {
   createGuidanceLoop,
   type GuidanceLoop,
 } from "./guidance/runGuidanceLoop";
+import { GuidanceBanner } from "./overlay/GuidanceBanner";
+import { OvalOverlay } from "./overlay/OvalOverlay";
+import { guidanceMessage } from "./overlay/guidanceCopy";
 import type {
   CaptureCandidate,
   CaptureResult,
@@ -265,6 +268,16 @@ export function FaceScanner({
     active && cameraLive && captureState === "IDLE" && !busy && !requesting;
 
   const displayError = localError || cameraError;
+  const aligned =
+    guidance.faceDetected &&
+    guidance.centered &&
+    guidance.distance === "GOOD";
+  const banner =
+    cameraLive && active
+      ? guidanceMessage(guidance, requiredPose)
+      : cameraLive
+        ? "Camera paused"
+        : "";
 
   return (
     <div>
@@ -278,6 +291,7 @@ export function FaceScanner({
             cameraLive ? "opacity-100" : "pointer-events-none opacity-0"
           }`}
         />
+        {cameraLive && <OvalOverlay aligned={aligned} />}
         {!cameraLive && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-zinc-300">
             <CameraOff className="size-10" />
@@ -286,6 +300,7 @@ export function FaceScanner({
             </p>
           </div>
         )}
+        {banner && <GuidanceBanner message={banner} />}
         {instructionSlot}
         {progressSlot}
       </div>
